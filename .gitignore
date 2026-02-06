@@ -1,0 +1,14 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# State files (generated at runtime)
+reconciliation_state.json
+reconciliation_results.csv
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
