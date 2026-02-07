@@ -44,7 +44,8 @@ class ReconciliationGUI:
         if data_dir is None:
             # Check if command line arg provided
             if len(sys.argv) > 1:
-                data_dir = os.path.abspath(sys.argv[1])
+                data_dir = sys.argv[1].strip().rstrip('"').rstrip("'")
+                data_dir = os.path.abspath(data_dir)
             else:
                 data_dir = code_dir
 
@@ -1148,7 +1149,8 @@ def main():
     """Main entry point for GUI application."""
     data_dir = None
     if len(sys.argv) > 1:
-        data_dir = os.path.abspath(sys.argv[1])
+        data_dir = sys.argv[1].strip().rstrip('"').rstrip("'")
+        data_dir = os.path.abspath(data_dir)
 
     root = tk.Tk()
 
