@@ -1,32 +1,113 @@
-# Bank Beacon Reconciliation System
+# Bank Beacon Reconciliation System v2
 
 A Python-based reconciliation system for matching bank transactions with accounting entries from the Beacon system.
 
+**v2** is a bank-centric redesign: you step through bank entries and see ranked beacon candidates, rather than stepping through pre-computed match suggestions.
+
+## Quick Start
+
+1. Ensure Python 3.7+ is installed (no external dependencies)
+2. Place your CSV files in a data folder (e.g. `data/mydata/`)
+3. Create a `config.json` in that folder (see below)
+4. Launch from the data folder:
+
+```bash
+# Windows - double-click run.bat in the data folder, or:
+python reconciliation_gui.py data/mydata/
+
+# Or run directly from the code directory:
+python reconciliation_gui.py
+```
+
 ## Features
 
-### Core Matching Logic
-- **1-to-1 Matching**: Match single bank transactions to single Beacon entries
-- **1-to-2 Matching**: Match single bank transactions to pairs of Beacon entries when amounts sum correctly
-- **Exact Amount Matching**: Amounts must match exactly (including 1-to-2 sums)
-- **Date Proximity**: Transactions must be within 7 days of each other
-- **Name Similarity**: Matches surname + initial patterns between bank descriptions and Beacon payees
+### Bank-Centric Navigation
+- **Left panel**: Bank entry details, stepping through in date order
+- **Right panel**: Beacon candidates for the current bank entry, ranked by confidence
+- Default shows un-reconciled bank entries only (toggle "Show all" for everything)
+- Each panel navigates independently with Prev/Next buttons
 
-### Common Amount Handling
-- £13.00 and £9.50 are identified as common amounts
-- These amounts are treated as weak matching signals
-- When common amounts are involved, date and name matching become more important
+### Matching
+- **1-to-1**: Single bank entry to single beacon entry (exact amount match)
+- **1-to-2**: Single bank entry to a pair of beacon entries (amounts sum correctly, auto-detected for common amounts)
+- **Manual match**: Enter trans_no(s) to match any combination
+- **Auto-reconcile**: Automatically reconcile all high-confidence matches
 
-### Beacon Exclusivity
-- Each Beacon entry can only match one Bank transaction
-- Once a Beacon entry is confirmed in a match, it becomes unavailable for other matches
+### Confidence Scoring
+- **Amount score**: Common amounts (configurable, e.g. £13, £9.50, £6.50) are weaker signals
+- **Date score**: Proximity within configurable tolerance (default 7 days)
+- **Name score**: Surname similarity matching between bank description and beacon payee
+- **Member match**: member_1/member_2 fields checked against member numbers in bank description (best indicator, 0.95 confidence)
 
-### GUI Features
-- **Navigation**: Previous/Next buttons to move between suggested matches
-- **Status Indicators**: Visual indicators showing Confirmed (green), Rejected (red), Skipped (blue), or Pending (yellow)
-- **Editable History**: Navigate back to previous matches and change decisions
-- **Queued Changes**: Changes are queued and applied when saving or refreshing
-- **Display Layout**: Bank transaction on left, Beacon entries (1 or 2) on right
-- **Confidence Scores**: Shows overall match confidence and breakdown by amount/date/name
+### Actions
+- **Reconcile**: Confirm the current bank/beacon pairing
+- **Un-reconcile**: Undo a reconciliation (frees both bank and beacon entries)
+- **Reject pairing**: Mark a specific candidate as rejected (moves to bottom of list, greyed out but still visible)
+- **Un-reject pairing**: Undo a rejection
+- **Mark as resolved**: For bank entries with no beacon match, record a comment explaining the resolution
+- **Auto-reconcile**: Batch-reconcile all entries above the confidence threshold
+
+### Search
+- **Bank search** (left panel): Search by description, amount, date, or bank ID
+- **Beacon search** (right panel): Search by payee, trans_no, amount, date, or detail. "All beacons" checkbox bypasses the normal filter to find reconciled entries too
+
+### Reports
+Click "Reports" to generate five files in the data folder:
+1. `report_reconciled.csv` - All reconciled bank/beacon pairings
+2. `report_unreconciled_bank.csv` - Bank entries not yet reconciled
+3. `report_unreconciled_beacon.csv` - Beacon entries not yet reconciled
+4. `report_resolved.csv` - Manually resolved entries with comments
+5. `report_stats.txt` - Summary statistics with date and version
+
+### Stats Bar
+Displayed at the top of the GUI:
+- Reconciled: count and total amount
+- Un-reconciled: count and total amount
+- Resolved: count and total amount
+- Version number
+
+## Folder Structure
+
+```
+Bank-Beacon-Reconcile-v2/
+├── reconciliation_system.py    # Core matching engine
+├── reconciliation_gui.py       # Tkinter GUI
+├── test_reconciliation.py      # Test suite (17 tests)
+├── migrate_v1_to_v2.py         # One-off v1 -> v2 state migration
+├── member_lookup.csv            # Shared member lookup (all datasets)
+├── README.md
+└── data/
+    └── sample/                  # One data folder per dataset
+        ├── config.json          # Per-dataset configuration
+        ├── Bank_Transactions.csv
+        ├── Beacon_Entries.csv
+        ├── run.bat              # Windows launcher
+        └── run.py               # Python launcher
+```
+
+Each dataset lives in its own subfolder under `data/`. The code and `member_lookup.csv` are shared at the top level.
+
+## Configuration
+
+Each data folder has a `config.json`:
+
+```json
+{
+    "bank_file": "Bank_Transactions.csv",
+    "beacon_file": "Beacon_Entries.csv",
+    "common_amounts": ["13.00", "9.50", "6.50"],
+    "date_tolerance_days": 7,
+    "trans_no_limit": 5,
+    "auto_reconcile_common_threshold": 0.90,
+    "auto_reconcile_other_threshold": 0.80
+}
+```
+
+- **bank_file / beacon_file**: CSV file names (can vary per dataset)
+- **common_amounts**: Amounts treated as weak matching signals
+- **date_tolerance_days**: Maximum days between bank and beacon dates
+- **trans_no_limit**: Maximum gap between trans_no values for 1-to-2 detection
+- **auto_reconcile thresholds**: Minimum confidence for auto-reconcile (separate for common and other amounts)
 
 ## File Format Requirements
 
@@ -35,153 +116,108 @@ A Python-based reconciliation system for matching bank transactions with account
 Date,Type,Description,Amount
 15-Jan-25,DEB,SMITH J PAYMENT,26.00
 ```
-- **Date**: DD-MMM-YY format (e.g., 15-Jan-25)
+- **Date**: Various formats supported (DD-MMM-YY, DD/MM/YYYY, etc.)
 - **Type**: Transaction type
-- **Description**: Transaction description (usually contains name in SURNAME INITIAL format)
+- **Description**: Usually contains name in SURNAME INITIAL format
 - **Amount**: Decimal amount
 
 ### Beacon_Entries.csv
 ```
-date,trans_no,payee,amount,detail,category,ref
-15/01/2025,TRN001,J Smith,13.00,First payment,Sales,REF001
+tkey,trans_no,date,account,amount,payee,detail,payment_method,cheque,notes,cleared,member_1,group,c_name
+1,TRN001,15/01/2025,Sales,13.00,J Smith,First payment,Card,,,,SmithJ,,
 ```
 - **date**: DD/MM/YYYY format
-- **trans_no**: Transaction number
-- **payee**: Payee name (usually in Initial Surname format)
+- **trans_no**: Transaction number (used for manual matching)
+- **payee**: Payee name
 - **amount**: Decimal amount
-- **detail**: Transaction detail
-- Additional columns are preserved but not used for matching
+- **member_1**: Forename+Surname with no space (e.g. "SmithJ") - key matching field
+- **member_2**: Second member field, same format
 
-## Installation
-
-1. Ensure Python 3.7+ is installed
-2. No external dependencies required (uses standard library only)
-
-## Usage
-
-### Command Line (Testing/Debugging)
-```bash
-python reconciliation_system.py
+### member_lookup.csv
 ```
-This will load the CSV files, generate match suggestions, and print them to the console.
-
-### Graphical Interface
-```bash
-python reconciliation_gui.py
+mem_no,status,forename,surname,known_as
+123,Current,John,Smith,Johnny
 ```
-This launches the full reconciliation interface.
-
-### GUI Workflow
-
-1. **Review Matches**: The system presents suggested matches one at a time
-2. **Make Decisions**:
-   - Click **Confirm** to accept a match
-   - Click **Reject** to mark as incorrect
-   - Click **Skip** to review later
-3. **Navigate**: Use Previous/Next buttons to move between matches
-4. **Edit Decisions**: Navigate back to change previous decisions
-5. **Save Progress**: Click "Save Progress" to persist decisions
-6. **Refresh**: Click "Refresh Suggestions" to regenerate matches after confirming some
-7. **Export**: Click "Export Results" to create a CSV report
+Shared across all datasets. Maps member numbers to names for matching against bank descriptions.
 
 ## Matching Algorithm
 
 ### Scoring Components
 
 1. **Amount Score** (0.0-1.0):
-   - Common amounts (£13.00, £9.50): 0.3 (weak signal)
+   - Common amounts: 0.3 (weak signal)
    - Other amounts: 1.0 (strong signal)
 
 2. **Date Score** (0.0-1.0):
-   - Same day: 1.0
-   - 7 days apart: ~0.14
-   - Beyond 7 days: 0.0 (excluded)
+   - Same day: 1.0, 1 day: 0.95, 2 days: 0.90, 3 days: 0.80
+   - 4-7 days: 0.60, 8-14 days: 0.40, 15-28 days: 0.25
+   - Beacon before bank: 1 day = 0.50, 2 days = 0.25, 3+ days = excluded
 
 3. **Name Score** (0.0-1.0):
-   - Based on similarity matching between normalized names
-   - Extracts surname + initial from both sources
+   - Based on surname similarity matching
+   - Member number match via member_1/member_2: 0.95 (overrides other scoring)
 
-### Confidence Calculation
+### Confidence Weights
 
-For common amounts:
-- Amount weight: 10%
-- Date weight: 45%
-- Name weight: 45%
+For common amounts: Amount 10%, Date 45%, Name 45%
 
-For other amounts:
-- Amount weight: 30%
-- Date weight: 35%
-- Name weight: 35%
+For other amounts: Amount 30%, Date 35%, Name 35%
 
-1-to-2 matches receive a 10% penalty to prefer simpler matches when confidence is similar.
+1-to-2 matches receive a 10% confidence penalty.
 
-## Output Files
+### Candidate Ordering
 
-### reconciliation_state.json
-Stores:
-- List of matched Beacon entry IDs
-- Confirmed matches with full details
+Candidates are sorted: non-rejected first (highest confidence first), then rejected (highest confidence first).
 
-### reconciliation_results.csv
-Export containing:
-- Bank transaction details
-- Match type and status
-- Confidence score
-- Beacon entry details (up to 2)
+## State
 
-## Example Output
+State is saved automatically to `reconciliation_state_v2.json` in the data folder. It stores:
+- **reconciliations**: List of bank-to-beacon pairings (reconciled and resolved)
+- **rejected_pairings**: Per-bank rejected beacon IDs (persists across sessions)
 
-```
-MATCH_0000: 1-to-2 (confidence: 0.85)
-  Bank: 15-Jan-25 - SMITH J PAYMENT - £26.00
-  Beacon 1: 15/01/2025 - J Smith - £13.00
-  Beacon 2: 15/01/2025 - J Smith - £13.00
+### Migrating from v1
 
-MATCH_0001: 1-to-1 (confidence: 0.92)
-  Bank: 16-Jan-25 - JONES A TRANSFER - £13.00
-  Beacon 1: 16/01/2025 - A Jones - £13.00
+If you have a v1 `reconciliation_state.json`, convert it:
+
+```bash
+python migrate_v1_to_v2.py path/to/reconciliation_state.json
 ```
 
-## Architecture
+This converts confirmed matches to reconciliations and carries over manually resolved entries. Rejected matches are ignored (not relevant in v2).
 
+## Testing
+
+```bash
+python test_reconciliation.py
 ```
-Bank-Beacon-Reconcile/
-├── reconciliation_system.py    # Core matching logic
-├── reconciliation_gui.py       # Tkinter GUI
-├── Bank_Transactions.csv       # Input: Bank transactions
-├── Beacon_Entries.csv          # Input: Beacon entries
-├── reconciliation_state.json   # Persistent state (generated)
-├── reconciliation_results.csv  # Export output (generated)
-└── README.md                   # This file
-```
+
+17 tests covering: loading, candidate generation, 1-to-1 matching, 1-to-2 matching, common amounts, reconcile/unreconcile, reject/unreject pairings, auto-reconcile, manual match, mark resolved, statistics, state persistence, search, exports, navigation helpers, candidate ordering.
 
 ## Classes
 
 ### reconciliation_system.py
-- `BankTransaction`: Data class for bank transactions
-- `BeaconEntry`: Data class for Beacon entries
-- `MatchSuggestion`: Data class for match suggestions
-- `MatchStatus`: Enum for match states (PENDING, CONFIRMED, REJECTED, SKIPPED)
-- `ReconciliationSystem`: Main matching engine
+- `BankTransaction`: Bank transaction data
+- `BeaconEntry`: Beacon entry data (includes member_1, member_2)
+- `BeaconCandidate`: A ranked candidate (single entry or pair) for a bank entry
+- `Reconciliation`: A confirmed pairing between bank and beacon entries
+- `ReconciliationSystem`: Main engine - candidate generation, reconciliation, search, exports
 
 ### reconciliation_gui.py
-- `ReconciliationGUI`: Main GUI application class
+- `ReconciliationGUI`: Split-panel Tkinter GUI
 
 ## Troubleshooting
 
 ### CSV Encoding Issues
-If you encounter encoding errors, ensure your CSV files are saved as UTF-8. The system handles UTF-8 BOM markers automatically.
+Files are read as UTF-8 with BOM handling. Save CSVs as UTF-8 if you encounter encoding errors.
+
+### No Candidates Found
+- Check amounts have potential exact matches in the beacon data
+- Verify dates are within the configured tolerance
+- Try increasing `date_tolerance_days` in config.json
+- Use the beacon search with "All beacons" to find entries manually
 
 ### Date Parsing Errors
-Ensure dates match the expected formats:
-- Bank: DD-MMM-YY (e.g., 15-Jan-25)
-- Beacon: DD/MM/YYYY (e.g., 15/01/2025)
-
-### No Matches Found
-If no matches are suggested:
-- Check that amounts have potential exact matches
-- Verify dates are within 7 days
-- Ensure CSV files are in the correct format
+Bank dates support multiple formats (DD-MMM-YY, DD/MM/YYYY, etc.). Beacon dates must be DD/MM/YYYY.
 
 ## License
 
