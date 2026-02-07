@@ -1,59 +1,57 @@
 """
-Bank Beacon Reconciliation GUI
-Graphical interface for reviewing and confirming match suggestions.
+Bank Beacon Reconciliation GUI v2
+Bank-centric split-panel interface for reconciling transactions.
 
-Features:
-- Navigation with Previous/Next buttons
-- Visual status indicators (Confirmed/Rejected/Skipped)
-- Editable history (change previous decisions)
-- Bank transaction on left, Beacon entries on right
-- 1-to-2 match display support
+v2 design:
+- Left panel: Bank entry details with Prev/Next navigation (date order)
+- Right panel: Beacon candidate details, one at a time, ranked by confidence
+- Default shows un-reconciled bank entries only (toggle to show all)
+- Rejected pairings shown at bottom of candidate list, greyed out
+- 1-to-2 candidates shown as a pair with single Reconcile button
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
-from typing import Optional
+from tkinter import ttk, messagebox, simpledialog
 import sys
+import os
 
 from reconciliation_system import (
-    ReconciliationSystem, MatchSuggestion, MatchStatus, debug_log
+    ReconciliationSystem, BeaconCandidate, Reconciliation,
+    BankTransaction, BeaconEntry, VERSION, debug_log
 )
 
 
 class ReconciliationGUI:
-    """Main GUI for bank reconciliation."""
+    """Main GUI for bank reconciliation v2."""
 
     # Color scheme
     COLORS = {
-        MatchStatus.PENDING: '#FFF3CD',      # Yellow/amber
-        MatchStatus.CONFIRMED: '#D4EDDA',    # Green
-        MatchStatus.REJECTED: '#F8D7DA',     # Red/pink
-        MatchStatus.SKIPPED: '#D1ECF1',      # Blue/cyan
-        MatchStatus.MANUAL_MATCH: '#C3E6CB', # Darker green for manual
-        MatchStatus.MANUALLY_RESOLVED: '#B8DAFF', # Blue for resolved
-        'no-match': '#E2E3E5',               # Gray
+        'reconciled': '#D4EDDA',       # Green
+        'unreconciled': '#FFF3CD',     # Yellow/amber
+        'resolved': '#B8DAFF',         # Blue
+        'rejected': '#F8D7DA',         # Red/pink
+        'no_candidates': '#E2E3E5',    # Gray
     }
 
-    STATUS_LABELS = {
-        MatchStatus.PENDING: 'PENDING',
-        MatchStatus.CONFIRMED: '✓ CONFIRMED',
-        MatchStatus.REJECTED: '✗ REJECTED',
-        MatchStatus.SKIPPED: '⏭ SKIPPED',
-        MatchStatus.MANUAL_MATCH: '⚡ MANUAL MATCH',
-        MatchStatus.MANUALLY_RESOLVED: '📋 MANUALLY RESOLVED',
-    }
-
-    def __init__(self, master: tk.Tk):
+    def __init__(self, master: tk.Tk, data_dir: str = None):
         self.master = master
-        self.master.title("Bank Beacon Reconciliation")
-        self.master.geometry("1200x700")
-        self.master.minsize(900, 600)
+        self.master.title(f"Bank Beacon Reconciliation v{VERSION}")
+        self.master.geometry("1300x750")
+        self.master.minsize(1000, 650)
+
+        # Determine directories
+        code_dir = os.path.dirname(os.path.abspath(__file__))
+        if data_dir is None:
+            # Check if command line arg provided
+            if len(sys.argv) > 1:
+                data_dir = os.path.abspath(sys.argv[1])
+            else:
+                data_dir = code_dir
 
         # Initialize reconciliation system
-        self.system = ReconciliationSystem()
+        self.system = ReconciliationSystem(data_dir=data_dir, code_dir=code_dir)
         self.system.load_data()
 
-        # Show loading summary
         bank_count = len(self.system.bank_transactions)
         beacon_count = len(self.system.beacon_entries)
 
@@ -61,133 +59,123 @@ class ReconciliationGUI:
             messagebox.showwarning(
                 "Loading Issue",
                 f"Loaded {bank_count} bank transactions and {beacon_count} beacon entries.\n\n"
-                f"Looking for files in:\n"
-                f"{self.system.base_dir}\n\n"
+                f"Data folder: {self.system.data_dir}\n\n"
                 f"Expected files:\n"
-                f"- {self.system.bank_file}\n"
-                f"- {self.system.beacon_file}\n\n"
+                f"- {self.system.config['bank_file']}\n"
+                f"- {self.system.config['beacon_file']}\n\n"
                 f"Please ensure both files exist and have the correct format."
             )
 
-        # Generate suggestions with progress dialog
-        self.suggestions = self._generate_with_progress()
+        # Bank navigation state
+        self.show_all_bank = False  # False = un-reconciled only
+        self.bank_list: list = []  # Current filtered bank list
+        self.bank_index: int = 0   # Current index into bank_list
 
-        # Current match index - start at first pending match
-        self.current_index = self._find_first_pending()
+        # Right panel: beacon candidates for current bank entry
+        self.candidates: list = []
+        self.candidate_index: int = 0
 
-        # Queued changes (for edits made when navigating back)
-        self.queued_changes = {}  # match_id -> new_status
+        # Search state
+        self.bank_search_matches: list = []
+        self.bank_search_index: int = 0
+        self.beacon_search_results: list = []  # BeaconEntry objects from search
+        self.beacon_search_active: bool = False
 
-        # Setup GUI components
+        # Build bank list
+        self._rebuild_bank_list()
+
+        # Setup GUI
         self._setup_styles()
         self._create_widgets()
         self._update_display()
 
-        # Show summary after GUI loads, then run consistency check
+        # Show startup summary
         if bank_count > 0 and beacon_count > 0:
-            confirmed = len([m for m in self.suggestions if m.status == MatchStatus.CONFIRMED])
-            pending = len([m for m in self.suggestions if m.status == MatchStatus.PENDING])
-            self.master.after(100, lambda: self._show_startup_summary(
-                bank_count, beacon_count, confirmed, pending
+            stats = self.system.get_statistics()
+            self.master.after(100, lambda: messagebox.showinfo(
+                "Data Loaded",
+                f"Loaded {bank_count} bank transactions\n"
+                f"Loaded {beacon_count} beacon entries\n\n"
+                f"Reconciled: {stats['reconciled_count']}\n"
+                f"Manually resolved: {stats['resolved_count']}\n"
+                f"Un-reconciled: {stats['unreconciled_count']}"
             ))
 
-    def _show_startup_summary(self, bank_count, beacon_count, confirmed, pending):
-        """Show startup summary and then run consistency check."""
-        messagebox.showinfo(
-            "Data Loaded",
-            f"Loaded {bank_count} bank transactions\n"
-            f"Loaded {beacon_count} beacon entries\n"
-            f"Generated {len(self.suggestions)} match suggestions\n\n"
-            f"Auto-confirmed: {confirmed}\n"
-            f"Pending review: {pending}"
-        )
-        # Run consistency check after summary is closed (don't show message if clean)
-        self.master.after(100, lambda: self._run_consistency_check(show_message_if_clean=False))
+    # -------------------------------------------------------------------
+    # Bank list management
+    # -------------------------------------------------------------------
 
-    def _generate_with_progress(self):
-        """Generate suggestions with a progress dialog."""
-        bank_count = len(self.system.bank_transactions)
+    def _rebuild_bank_list(self):
+        """Rebuild the filtered bank entry list."""
+        if self.show_all_bank:
+            self.bank_list = list(self.system.get_bank_entries_sorted())
+        else:
+            self.bank_list = list(self.system.get_unreconciled_bank_entries())
 
-        # For small datasets, skip progress dialog
-        if bank_count < 50:
-            return self.system.generate_suggestions()
+        # Clamp index
+        if self.bank_list:
+            self.bank_index = max(0, min(self.bank_index, len(self.bank_list) - 1))
+        else:
+            self.bank_index = 0
 
-        # Create progress dialog
-        progress_window = tk.Toplevel(self.master)
-        progress_window.title("Generating Matches")
-        progress_window.geometry("400x120")
-        progress_window.transient(self.master)
-        progress_window.grab_set()
+    def _current_bank(self):
+        """Get the current bank transaction, or None."""
+        if self.bank_list and 0 <= self.bank_index < len(self.bank_list):
+            return self.bank_list[self.bank_index]
+        return None
 
-        # Center the dialog
-        progress_window.update_idletasks()
-        x = self.master.winfo_x() + (self.master.winfo_width() - 400) // 2
-        y = self.master.winfo_y() + (self.master.winfo_height() - 120) // 2
-        progress_window.geometry(f"+{x}+{y}")
+    def _current_candidate(self):
+        """Get the current beacon candidate, or None."""
+        if self.candidates and 0 <= self.candidate_index < len(self.candidates):
+            return self.candidates[self.candidate_index]
+        return None
 
-        ttk.Label(progress_window, text="Processing transactions...",
-                  font=('Segoe UI', 11)).pack(pady=(15, 5))
+    def _refresh_candidates(self):
+        """Refresh beacon candidates for current bank entry."""
+        bank = self._current_bank()
+        if bank and not self.system.is_bank_reconciled(bank.id):
+            self.candidates = self.system.get_candidates_for_bank(bank)
+        else:
+            self.candidates = []
+        self.candidate_index = 0
+        self.beacon_search_active = False
 
-        progress_label = ttk.Label(progress_window, text="Initializing...")
-        progress_label.pack(pady=5)
-
-        progress_bar = ttk.Progressbar(progress_window, length=350, mode='determinate')
-        progress_bar.pack(pady=10)
-
-        def update_progress(current, total, message):
-            progress_bar['maximum'] = total
-            progress_bar['value'] = current
-            progress_label.config(text=f"[{current}/{total}] {message[:40]}")
-            progress_window.update()
-
-        # Generate suggestions
-        suggestions = self.system.generate_suggestions(progress_callback=update_progress)
-
-        progress_window.destroy()
-        return suggestions
-
-    def _find_first_pending(self):
-        """Find the index of the first pending match (skipping rejected)."""
-        for i, match in enumerate(self.suggestions):
-            if match.status == MatchStatus.PENDING:
-                return i
-        # If no pending, find first non-confirmed, non-rejected
-        for i, match in enumerate(self.suggestions):
-            if match.status not in (MatchStatus.CONFIRMED, MatchStatus.REJECTED):
-                return i
-        return 0
+    # -------------------------------------------------------------------
+    # Styles
+    # -------------------------------------------------------------------
 
     def _setup_styles(self):
         """Configure ttk styles."""
         style = ttk.Style()
         style.configure('Title.TLabel', font=('Segoe UI', 14, 'bold'))
         style.configure('Header.TLabel', font=('Segoe UI', 11, 'bold'))
-        style.configure('Amount.TLabel', font=('Segoe UI', 12, 'bold'))
+        style.configure('Amount.TLabel', font=('Segoe UI', 13, 'bold'))
         style.configure('Status.TLabel', font=('Segoe UI', 10, 'bold'))
         style.configure('Nav.TButton', font=('Segoe UI', 10))
-        style.configure('Action.TButton', font=('Segoe UI', 10, 'bold'), padding=10)
-        # Larger text for values (description, payee, detail)
+        style.configure('Action.TButton', font=('Segoe UI', 10, 'bold'), padding=8)
         style.configure('Value.TLabel', font=('Segoe UI', 12))
+        style.configure('Rejected.TLabel', font=('Segoe UI', 10), foreground='#999999')
+        style.configure('Small.TLabel', font=('Segoe UI', 9))
+
+    # -------------------------------------------------------------------
+    # Widget creation
+    # -------------------------------------------------------------------
 
     def _create_widgets(self):
         """Create all GUI widgets."""
-        # Create outer frame for canvas and scrollbar
+        # Outer frame with scrollbar
         outer_frame = ttk.Frame(self.master)
         outer_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Create canvas with scrollbar
         self.canvas = tk.Canvas(outer_frame, highlightthickness=0)
         scrollbar = ttk.Scrollbar(outer_frame, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=scrollbar.set)
-
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Create main frame inside canvas
-        main_frame = ttk.Frame(self.canvas, padding="10")
+        main_frame = ttk.Frame(self.canvas, padding="8")
         self.canvas_window = self.canvas.create_window((0, 0), window=main_frame, anchor="nw")
 
-        # Configure canvas scrolling
         def configure_scroll(event):
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
@@ -197,1494 +185,982 @@ class ReconciliationGUI:
         main_frame.bind("<Configure>", configure_scroll)
         self.canvas.bind("<Configure>", configure_canvas_width)
 
-        # Enable mousewheel scrolling
+        # Mousewheel scrolling
         def on_mousewheel(event):
             self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
         def on_mousewheel_linux(event):
             if event.num == 4:
                 self.canvas.yview_scroll(-1, "units")
             elif event.num == 5:
                 self.canvas.yview_scroll(1, "units")
 
-        self.canvas.bind_all("<MouseWheel>", on_mousewheel)  # Windows/Mac
-        self.canvas.bind_all("<Button-4>", on_mousewheel_linux)  # Linux scroll up
-        self.canvas.bind_all("<Button-5>", on_mousewheel_linux)  # Linux scroll down
+        self.canvas.bind_all("<MouseWheel>", on_mousewheel)
+        self.canvas.bind_all("<Button-4>", on_mousewheel_linux)
+        self.canvas.bind_all("<Button-5>", on_mousewheel_linux)
 
-        # Top section: Statistics and progress
-        self._create_stats_section(main_frame)
+        # --- Stats bar ---
+        self._create_stats_bar(main_frame)
 
-        # Middle section: Transaction display
-        self._create_transaction_section(main_frame)
+        # --- Main content: bank (left) + beacon (right) ---
+        content_frame = ttk.Frame(main_frame)
+        content_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 5))
+        content_frame.columnconfigure(0, weight=1)
+        content_frame.columnconfigure(1, weight=1)
+        content_frame.rowconfigure(0, weight=1)
 
-        # Bottom section: Actions and navigation
-        self._create_action_section(main_frame)
+        self._create_bank_panel(content_frame)
+        self._create_beacon_panel(content_frame)
 
-    def _create_stats_section(self, parent):
-        """Create statistics display section."""
-        stats_frame = ttk.LabelFrame(parent, text="Reconciliation Progress", padding="10")
-        stats_frame.pack(fill=tk.X, pady=(0, 10))
+        # --- Action bar ---
+        self._create_action_bar(main_frame)
 
-        # Top row: Progress info and stats
-        top_row = ttk.Frame(stats_frame)
-        top_row.pack(fill=tk.X)
+    def _create_stats_bar(self, parent):
+        """Create the stats bar at top."""
+        stats_frame = ttk.Frame(parent)
+        stats_frame.pack(fill=tk.X, pady=(0, 5))
 
-        # Progress info
-        self.progress_label = ttk.Label(top_row, text="Match 0 of 0")
-        self.progress_label.pack(side=tk.LEFT)
+        # Version
+        ttk.Label(stats_frame, text=f"v{VERSION}", style='Small.TLabel',
+                  foreground='gray').pack(side=tk.LEFT, padx=(0, 15))
 
-        # Stats summary
-        self.stats_label = ttk.Label(top_row, text="")
-        self.stats_label.pack(side=tk.RIGHT)
+        # Stats labels
+        self.stats_label = ttk.Label(stats_frame, text="", style='Small.TLabel')
+        self.stats_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Progress bar
-        self.progress_bar = ttk.Progressbar(
-            top_row, mode='determinate', length=300
-        )
-        self.progress_bar.pack(side=tk.LEFT, padx=20)
+        # Bank navigation counter
+        self.bank_counter_label = ttk.Label(stats_frame, text="", style='Small.TLabel')
+        self.bank_counter_label.pack(side=tk.RIGHT)
 
-        # Bottom row: Search/filter
-        search_row = ttk.Frame(stats_frame)
-        search_row.pack(fill=tk.X, pady=(10, 0))
-
-        ttk.Label(search_row, text="Search:").pack(side=tk.LEFT)
-        self.search_entry = ttk.Entry(search_row, width=30)
-        self.search_entry.pack(side=tk.LEFT, padx=5)
-        self.search_entry.bind('<Return>', self._on_search)
-
-        ttk.Button(search_row, text="Find", command=self._on_search).pack(side=tk.LEFT, padx=2)
-        ttk.Button(search_row, text="Find Prev", command=self._on_search_prev).pack(side=tk.LEFT, padx=2)
-        ttk.Button(search_row, text="Find Next", command=self._on_search_next).pack(side=tk.LEFT, padx=2)
-        ttk.Button(search_row, text="Clear", command=self._on_search_clear).pack(side=tk.LEFT, padx=2)
-
-        self.search_result_label = ttk.Label(search_row, text="", foreground='gray')
-        self.search_result_label.pack(side=tk.LEFT, padx=10)
-
-        # Search help text
-        search_help = ttk.Label(
-            search_row,
-            text='[name | "exact" | £amount | date | TR_transno | MATCH_/BANK_/BEACON_id]',
-            foreground='#666666',
-            font=('Segoe UI', 8)
-        )
-        search_help.pack(side=tk.LEFT, padx=5)
-
-        # Track search state
-        self.search_matches = []
-        self.search_index = 0
-
-    def _create_transaction_section(self, parent):
-        """Create transaction display section with Bank on left, Beacon on right."""
-        txn_frame = ttk.Frame(parent)
-        txn_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-
-        # Configure grid weights for responsive layout
-        txn_frame.columnconfigure(0, weight=1)
-        txn_frame.columnconfigure(1, weight=1)
-        txn_frame.rowconfigure(0, weight=1)
-
-        # Left side: Bank Transaction
-        self._create_bank_panel(txn_frame)
-
-        # Right side: Beacon Entries
-        self._create_beacon_panel(txn_frame)
+    # -------------------------------------------------------------------
+    # Left panel: Bank entry
+    # -------------------------------------------------------------------
 
     def _create_bank_panel(self, parent):
-        """Create bank transaction panel (left side)."""
-        bank_frame = ttk.LabelFrame(parent, text="Bank Transaction", padding="15")
-        bank_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 5))
+        """Create bank entry panel (left side)."""
+        bank_outer = ttk.LabelFrame(parent, text="Bank Entry", padding="10")
+        bank_outer.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
+
+        # Navigation row
+        nav_row = ttk.Frame(bank_outer)
+        nav_row.pack(fill=tk.X, pady=(0, 8))
+
+        self.bank_prev_btn = ttk.Button(nav_row, text="< Prev Bank",
+                                         command=self._on_bank_prev, style='Nav.TButton')
+        self.bank_prev_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.bank_next_btn = ttk.Button(nav_row, text="Next Bank >",
+                                         command=self._on_bank_next, style='Nav.TButton')
+        self.bank_next_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Show all toggle
+        self.show_all_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(nav_row, text="Show all",
+                         variable=self.show_all_var,
+                         command=self._on_show_all_changed).pack(side=tk.LEFT, padx=5)
+
+        self.bank_nav_label = ttk.Label(nav_row, text="0 / 0", style='Small.TLabel')
+        self.bank_nav_label.pack(side=tk.RIGHT)
 
         # Status indicator
-        self.bank_status_frame = tk.Frame(bank_frame)
-        self.bank_status_frame.pack(fill=tk.X, pady=(0, 10))
+        self.bank_status_frame = tk.Frame(bank_outer, height=28)
+        self.bank_status_frame.pack(fill=tk.X, pady=(0, 8))
+        self.bank_status_frame.pack_propagate(False)
 
-        self.status_label = ttk.Label(
-            self.bank_status_frame, text="PENDING",
-            style='Status.TLabel'
-        )
-        self.status_label.pack(side=tk.LEFT)
+        self.bank_status_label = ttk.Label(self.bank_status_frame, text="UN-RECONCILED",
+                                            style='Status.TLabel')
+        self.bank_status_label.pack(side=tk.LEFT, padx=5, pady=2)
 
-        self.match_type_label = ttk.Label(
-            self.bank_status_frame, text="1-to-1",
-            style='Status.TLabel'
-        )
-        self.match_type_label.pack(side=tk.RIGHT)
-
-        # Bank details
-        details_frame = ttk.Frame(bank_frame)
-        details_frame.pack(fill=tk.BOTH, expand=True)
-
-        # Match ID
-        ttk.Label(details_frame, text="Match ID:", style='Header.TLabel').grid(
-            row=0, column=0, sticky='w', pady=5
-        )
-        self.match_id_label = ttk.Label(details_frame, text="", foreground='gray')
-        self.match_id_label.grid(row=0, column=1, sticky='w', padx=10, pady=5)
-
-        # Bank ID
-        ttk.Label(details_frame, text="Bank ID:", style='Header.TLabel').grid(
-            row=1, column=0, sticky='w', pady=5
-        )
-        self.bank_id_label = ttk.Label(details_frame, text="", foreground='gray')
-        self.bank_id_label.grid(row=1, column=1, sticky='w', padx=10, pady=5)
-
-        # Date
-        ttk.Label(details_frame, text="Date:", style='Header.TLabel').grid(
-            row=2, column=0, sticky='w', pady=5
-        )
-        self.bank_date_label = ttk.Label(details_frame, text="")
-        self.bank_date_label.grid(row=2, column=1, sticky='w', padx=10, pady=5)
-
-        # Type
-        ttk.Label(details_frame, text="Type:", style='Header.TLabel').grid(
-            row=3, column=0, sticky='w', pady=5
-        )
-        self.bank_type_label = ttk.Label(details_frame, text="")
-        self.bank_type_label.grid(row=3, column=1, sticky='w', padx=10, pady=5)
-
-        # Description
-        ttk.Label(details_frame, text="Description:", style='Header.TLabel').grid(
-            row=4, column=0, sticky='w', pady=5
-        )
-        self.bank_desc_label = ttk.Label(details_frame, text="", wraplength=350, style='Value.TLabel')
-        self.bank_desc_label.grid(row=4, column=1, sticky='w', padx=10, pady=5)
-
-        # Member lookup (based on numbers in description)
-        ttk.Label(details_frame, text="Member:", style='Header.TLabel').grid(
-            row=5, column=0, sticky='nw', pady=5
-        )
-        self.member_lookup_label = ttk.Label(
-            details_frame, text="", wraplength=350,
-            foreground='#006600', justify=tk.LEFT
-        )
-        self.member_lookup_label.grid(row=5, column=1, sticky='w', padx=10, pady=5)
-
-        # Amount (prominent)
-        amount_frame = ttk.Frame(bank_frame)
-        amount_frame.pack(fill=tk.X, pady=(20, 0))
-
-        ttk.Label(amount_frame, text="Amount:", style='Header.TLabel').pack(side=tk.LEFT)
-        self.bank_amount_label = ttk.Label(
-            amount_frame, text="£0.00", style='Amount.TLabel',
-            foreground='#0066CC'
-        )
-        self.bank_amount_label.pack(side=tk.LEFT, padx=10)
-
-        # Confidence score
-        confidence_frame = ttk.Frame(bank_frame)
-        confidence_frame.pack(fill=tk.X, pady=(10, 0))
-
-        ttk.Label(confidence_frame, text="Confidence:", style='Header.TLabel').pack(side=tk.LEFT)
-        self.confidence_label = ttk.Label(confidence_frame, text="0%")
-        self.confidence_label.pack(side=tk.LEFT, padx=10)
-
-        # Score breakdown
-        self.score_breakdown_label = ttk.Label(bank_frame, text="", foreground='gray')
-        self.score_breakdown_label.pack(fill=tk.X, pady=(5, 0))
-
-    def _create_beacon_panel(self, parent):
-        """Create beacon entries panel (right side) - supports 1-2 entries."""
-        beacon_frame = ttk.LabelFrame(parent, text="Beacon Entries", padding="15")
-        beacon_frame.grid(row=0, column=1, sticky='nsew', padx=(5, 0))
-
-        # Container for beacon entries (will hold 1 or 2 entry frames)
-        self.beacon_container = ttk.Frame(beacon_frame)
-        self.beacon_container.pack(fill=tk.BOTH, expand=True)
-
-        # Create two entry frames (second one may be hidden)
-        self.beacon_frames = []
-        self.beacon_widgets = []
-
-        for i in range(2):
-            frame = ttk.Frame(self.beacon_container)
-            widgets = self._create_beacon_entry_widgets(frame, i + 1)
-            self.beacon_frames.append(frame)
-            self.beacon_widgets.append(widgets)
-
-        # Total amount (for 1-to-2 matches)
-        self.total_frame = ttk.Frame(beacon_frame)
-        ttk.Label(self.total_frame, text="Total:", style='Header.TLabel').pack(side=tk.LEFT)
-        self.beacon_total_label = ttk.Label(
-            self.total_frame, text="£0.00", style='Amount.TLabel',
-            foreground='#0066CC'
-        )
-        self.beacon_total_label.pack(side=tk.LEFT, padx=10)
-
-        # Additional entries indicator (for manual matches with >2 entries)
-        self.additional_entries_label = ttk.Label(
-            beacon_frame,
-            text="",
-            font=('Segoe UI', 10, 'italic'),
-            foreground='#666666'
-        )
-
-        # No match message
-        self.no_match_label = ttk.Label(
-            beacon_frame,
-            text="No matching Beacon entries found",
-            font=('Segoe UI', 10),
-            foreground='gray',
-            justify='center'
-        )
-
-    def _create_beacon_entry_widgets(self, frame, entry_num):
-        """Create widgets for a single beacon entry display."""
-        widgets = {}
-
-        # Entry header
-        header_frame = ttk.Frame(frame)
-        header_frame.pack(fill=tk.X, pady=(0, 5))
-
-        widgets['header'] = ttk.Label(
-            header_frame, text=f"Entry {entry_num}", style='Header.TLabel'
-        )
-        widgets['header'].pack(side=tk.LEFT)
-
-        # Separator
-        sep = ttk.Separator(frame, orient='horizontal')
-        sep.pack(fill=tk.X, pady=5)
+        self.bank_rec_type_label = ttk.Label(self.bank_status_frame, text="",
+                                              style='Small.TLabel', foreground='gray')
+        self.bank_rec_type_label.pack(side=tk.RIGHT, padx=5, pady=2)
 
         # Details grid
+        details = ttk.Frame(bank_outer)
+        details.pack(fill=tk.BOTH, expand=True)
+
+        row = 0
+        ttk.Label(details, text="Bank ID:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        self.bank_id_label = ttk.Label(details, text="", foreground='gray')
+        self.bank_id_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+
+        row += 1
+        ttk.Label(details, text="Date:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        self.bank_date_label = ttk.Label(details, text="")
+        self.bank_date_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+
+        row += 1
+        ttk.Label(details, text="Type:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        self.bank_type_label = ttk.Label(details, text="")
+        self.bank_type_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+
+        row += 1
+        ttk.Label(details, text="Description:", style='Header.TLabel').grid(row=row, column=0, sticky='nw', pady=3)
+        self.bank_desc_label = ttk.Label(details, text="", wraplength=350, style='Value.TLabel')
+        self.bank_desc_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+
+        row += 1
+        ttk.Label(details, text="Member:", style='Header.TLabel').grid(row=row, column=0, sticky='nw', pady=3)
+        self.member_lookup_label = ttk.Label(details, text="", wraplength=350,
+                                              foreground='#006600', justify=tk.LEFT)
+        self.member_lookup_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+
+        row += 1
+        ttk.Label(details, text="Amount:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        self.bank_amount_label = ttk.Label(details, text="", style='Amount.TLabel',
+                                            foreground='#0066CC')
+        self.bank_amount_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+
+        # Reconciled beacon info (shown when bank is reconciled)
+        self.reconciled_info_frame = ttk.LabelFrame(bank_outer, text="Reconciled With", padding="5")
+        self.reconciled_info_label = ttk.Label(self.reconciled_info_frame, text="",
+                                                wraplength=400, justify=tk.LEFT)
+        self.reconciled_info_label.pack(fill=tk.X)
+        self.reconciled_comment_label = ttk.Label(self.reconciled_info_frame, text="",
+                                                   foreground='#666666', wraplength=400)
+        self.reconciled_comment_label.pack(fill=tk.X)
+
+        # Bank search
+        search_frame = ttk.Frame(bank_outer)
+        search_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(search_frame, text="Search:", style='Small.TLabel').pack(side=tk.LEFT)
+        self.bank_search_entry = ttk.Entry(search_frame, width=20)
+        self.bank_search_entry.pack(side=tk.LEFT, padx=3)
+        self.bank_search_entry.bind('<Return>', self._on_bank_search)
+        ttk.Button(search_frame, text="Find", command=self._on_bank_search).pack(side=tk.LEFT, padx=1)
+        ttk.Button(search_frame, text="Next", command=self._on_bank_search_next).pack(side=tk.LEFT, padx=1)
+        ttk.Button(search_frame, text="Clear", command=self._on_bank_search_clear).pack(side=tk.LEFT, padx=1)
+        self.bank_search_result = ttk.Label(search_frame, text="", foreground='gray',
+                                             style='Small.TLabel')
+        self.bank_search_result.pack(side=tk.LEFT, padx=5)
+
+    # -------------------------------------------------------------------
+    # Right panel: Beacon candidate
+    # -------------------------------------------------------------------
+
+    def _create_beacon_panel(self, parent):
+        """Create beacon candidate panel (right side)."""
+        beacon_outer = ttk.LabelFrame(parent, text="Beacon Candidate", padding="10")
+        beacon_outer.grid(row=0, column=1, sticky='nsew', padx=(4, 0))
+
+        # Navigation row
+        nav_row = ttk.Frame(beacon_outer)
+        nav_row.pack(fill=tk.X, pady=(0, 8))
+
+        self.beacon_prev_btn = ttk.Button(nav_row, text="< Prev Candidate",
+                                           command=self._on_candidate_prev, style='Nav.TButton')
+        self.beacon_prev_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.beacon_next_btn = ttk.Button(nav_row, text="Next Candidate >",
+                                           command=self._on_candidate_next, style='Nav.TButton')
+        self.beacon_next_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.beacon_nav_label = ttk.Label(nav_row, text="0 / 0", style='Small.TLabel')
+        self.beacon_nav_label.pack(side=tk.RIGHT)
+
+        # Confidence / type indicator
+        score_row = ttk.Frame(beacon_outer)
+        score_row.pack(fill=tk.X, pady=(0, 5))
+
+        self.confidence_label = ttk.Label(score_row, text="", style='Status.TLabel')
+        self.confidence_label.pack(side=tk.LEFT)
+
+        self.match_type_label = ttk.Label(score_row, text="", style='Small.TLabel',
+                                           foreground='gray')
+        self.match_type_label.pack(side=tk.LEFT, padx=10)
+
+        self.score_breakdown_label = ttk.Label(score_row, text="", foreground='gray',
+                                                style='Small.TLabel')
+        self.score_breakdown_label.pack(side=tk.RIGHT)
+
+        # Rejected indicator
+        self.rejected_indicator = ttk.Label(beacon_outer, text="REJECTED PAIRING",
+                                             foreground='#CC0000',
+                                             font=('Segoe UI', 10, 'bold'))
+
+        # Beacon entry 1
+        self.beacon1_frame = ttk.LabelFrame(beacon_outer, text="Beacon Entry 1", padding="5")
+        self.beacon1_widgets = self._create_beacon_entry_widgets(self.beacon1_frame)
+
+        # Beacon entry 2 (for 1-to-2 matches)
+        self.beacon2_frame = ttk.LabelFrame(beacon_outer, text="Beacon Entry 2", padding="5")
+        self.beacon2_widgets = self._create_beacon_entry_widgets(self.beacon2_frame)
+
+        # Total row (for 1-to-2)
+        self.total_frame = ttk.Frame(beacon_outer)
+        ttk.Label(self.total_frame, text="Total:", style='Header.TLabel').pack(side=tk.LEFT)
+        self.beacon_total_label = ttk.Label(self.total_frame, text="", style='Amount.TLabel',
+                                             foreground='#0066CC')
+        self.beacon_total_label.pack(side=tk.LEFT, padx=10)
+
+        # No candidates message
+        self.no_candidates_label = ttk.Label(beacon_outer, text="",
+                                              font=('Segoe UI', 11), foreground='gray',
+                                              justify='center')
+
+        # Beacon search
+        search_frame = ttk.Frame(beacon_outer)
+        search_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+        ttk.Label(search_frame, text="Search:", style='Small.TLabel').pack(side=tk.LEFT)
+        self.beacon_search_entry = ttk.Entry(search_frame, width=20)
+        self.beacon_search_entry.pack(side=tk.LEFT, padx=3)
+        self.beacon_search_entry.bind('<Return>', self._on_beacon_search)
+        ttk.Button(search_frame, text="Find", command=self._on_beacon_search).pack(side=tk.LEFT, padx=1)
+        self.beacon_bypass_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(search_frame, text="All beacons",
+                         variable=self.beacon_bypass_var).pack(side=tk.LEFT, padx=3)
+        ttk.Button(search_frame, text="Clear", command=self._on_beacon_search_clear).pack(side=tk.LEFT, padx=1)
+        self.beacon_search_result = ttk.Label(search_frame, text="", foreground='gray',
+                                               style='Small.TLabel')
+        self.beacon_search_result.pack(side=tk.LEFT, padx=5)
+
+    def _create_beacon_entry_widgets(self, frame):
+        """Create widgets for a single beacon entry display."""
+        widgets = {}
         details = ttk.Frame(frame)
         details.pack(fill=tk.X)
 
-        # Beacon ID
-        ttk.Label(details, text="ID:").grid(row=0, column=0, sticky='w', pady=3)
-        widgets['id'] = ttk.Label(details, text="", foreground='gray')
-        widgets['id'].grid(row=0, column=1, sticky='w', padx=10, pady=3)
-
-        # Trans No
-        ttk.Label(details, text="Trans No:").grid(row=1, column=0, sticky='w', pady=3)
+        row = 0
+        ttk.Label(details, text="Trans No:").grid(row=row, column=0, sticky='w', pady=2)
         widgets['trans_no'] = ttk.Label(details, text="")
-        widgets['trans_no'].grid(row=1, column=1, sticky='w', padx=10, pady=3)
+        widgets['trans_no'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
 
-        # Date
-        ttk.Label(details, text="Date:").grid(row=2, column=0, sticky='w', pady=3)
+        row += 1
+        ttk.Label(details, text="Date:").grid(row=row, column=0, sticky='w', pady=2)
         widgets['date'] = ttk.Label(details, text="")
-        widgets['date'].grid(row=2, column=1, sticky='w', padx=10, pady=3)
+        widgets['date'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
 
-        # Payee
-        ttk.Label(details, text="Payee:").grid(row=3, column=0, sticky='w', pady=3)
-        widgets['payee'] = ttk.Label(details, text="", wraplength=300, style='Value.TLabel')
-        widgets['payee'].grid(row=3, column=1, sticky='w', padx=10, pady=3)
+        row += 1
+        ttk.Label(details, text="Payee:").grid(row=row, column=0, sticky='w', pady=2)
+        widgets['payee'] = ttk.Label(details, text="", wraplength=280, style='Value.TLabel')
+        widgets['payee'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
 
-        # Detail
-        ttk.Label(details, text="Detail:").grid(row=4, column=0, sticky='w', pady=3)
-        widgets['detail'] = ttk.Label(details, text="", wraplength=300, style='Value.TLabel')
-        widgets['detail'].grid(row=4, column=1, sticky='w', padx=10, pady=3)
+        row += 1
+        ttk.Label(details, text="Detail:").grid(row=row, column=0, sticky='w', pady=2)
+        widgets['detail'] = ttk.Label(details, text="", wraplength=280, style='Value.TLabel')
+        widgets['detail'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
 
-        # Amount
-        ttk.Label(details, text="Amount:").grid(row=5, column=0, sticky='w', pady=3)
-        widgets['amount'] = ttk.Label(details, text="£0.00", foreground='#0066CC')
-        widgets['amount'].grid(row=5, column=1, sticky='w', padx=10, pady=3)
+        row += 1
+        ttk.Label(details, text="Member 1:").grid(row=row, column=0, sticky='w', pady=2)
+        widgets['member_1'] = ttk.Label(details, text="", foreground='#006600')
+        widgets['member_1'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
+
+        row += 1
+        ttk.Label(details, text="Member 2:").grid(row=row, column=0, sticky='w', pady=2)
+        widgets['member_2'] = ttk.Label(details, text="", foreground='#006600')
+        widgets['member_2'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
+
+        row += 1
+        ttk.Label(details, text="Amount:").grid(row=row, column=0, sticky='w', pady=2)
+        widgets['amount'] = ttk.Label(details, text="", foreground='#0066CC',
+                                       font=('Segoe UI', 11, 'bold'))
+        widgets['amount'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
+
+        row += 1
+        ttk.Label(details, text="ID:").grid(row=row, column=0, sticky='w', pady=2)
+        widgets['id'] = ttk.Label(details, text="", foreground='gray')
+        widgets['id'].grid(row=row, column=1, sticky='w', padx=10, pady=2)
 
         return widgets
 
-    def _create_action_section(self, parent):
-        """Create action buttons and navigation section in two rows."""
-        action_frame = ttk.LabelFrame(parent, text="Navigation & Actions", padding="5")
-        action_frame.pack(fill=tk.X, pady=(10, 0))
+    # -------------------------------------------------------------------
+    # Action bar
+    # -------------------------------------------------------------------
 
-        # Row 1: Navigation controls
-        nav_row = ttk.Frame(action_frame)
-        nav_row.pack(fill=tk.X, pady=(0, 5))
+    def _create_action_bar(self, parent):
+        """Create the action buttons bar at bottom."""
+        action_frame = ttk.LabelFrame(parent, text="Actions", padding="5")
+        action_frame.pack(fill=tk.X, pady=(5, 0))
 
-        self.prev_button = ttk.Button(
-            nav_row, text="◀ Previous", style='Nav.TButton',
-            command=self._on_previous
-        )
-        self.prev_button.pack(side=tk.LEFT, padx=5)
+        # Row 1: Primary actions
+        row1 = ttk.Frame(action_frame)
+        row1.pack(fill=tk.X, pady=(0, 4))
 
-        self.next_button = ttk.Button(
-            nav_row, text="Next ▶", style='Nav.TButton',
-            command=self._on_next
-        )
-        self.next_button.pack(side=tk.LEFT, padx=5)
+        self.reconcile_btn = ttk.Button(row1, text="Reconcile",
+                                         style='Action.TButton',
+                                         command=self._on_reconcile)
+        self.reconcile_btn.pack(side=tk.LEFT, padx=3)
 
-        # Jump to input
-        ttk.Label(nav_row, text="  Go to:").pack(side=tk.LEFT)
-        self.jump_entry = ttk.Entry(nav_row, width=5)
-        self.jump_entry.pack(side=tk.LEFT, padx=5)
-        self.jump_entry.bind('<Return>', self._on_jump)
-        ttk.Button(nav_row, text="Go", command=self._on_jump).pack(side=tk.LEFT)
+        self.unreconcile_btn = ttk.Button(row1, text="Un-reconcile",
+                                           command=self._on_unreconcile)
+        self.unreconcile_btn.pack(side=tk.LEFT, padx=3)
 
-        # Skip checkboxes
-        ttk.Label(nav_row, text="    ").pack(side=tk.LEFT)
-        self.skip_confirmed_var = tk.BooleanVar(value=True)
-        self.skip_confirmed_check = ttk.Checkbutton(
-            nav_row, text="Skip confirmed", variable=self.skip_confirmed_var
-        )
-        self.skip_confirmed_check.pack(side=tk.LEFT, padx=5)
+        ttk.Separator(row1, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        self.skip_rejected_var = tk.BooleanVar(value=True)
-        self.skip_rejected_check = ttk.Checkbutton(
-            nav_row, text="Skip rejected", variable=self.skip_rejected_var
-        )
-        self.skip_rejected_check.pack(side=tk.LEFT, padx=5)
+        self.reject_btn = ttk.Button(row1, text="Reject Pairing",
+                                      command=self._on_reject_pairing)
+        self.reject_btn.pack(side=tk.LEFT, padx=3)
 
-        # Show all transactions checkbox
-        self.show_all_var = tk.BooleanVar(value=False)
-        self.show_all_check = ttk.Checkbutton(
-            nav_row, text="Show all transactions",
-            variable=self.show_all_var,
-            command=self._on_show_all_changed
-        )
-        self.show_all_check.pack(side=tk.LEFT, padx=10)
+        self.unreject_btn = ttk.Button(row1, text="Un-reject Pairing",
+                                        command=self._on_unreject_pairing)
+        self.unreject_btn.pack(side=tk.LEFT, padx=3)
 
-        # Trans_no limit for 1-to-2 matches
-        ttk.Label(nav_row, text="1-to-2 trans_no limit:").pack(side=tk.LEFT, padx=(10, 2))
-        self.trans_no_limit_var = tk.IntVar(value=5)
-        self.trans_no_limit_spinbox = ttk.Spinbox(
-            nav_row, from_=1, to=20, width=4,
-            textvariable=self.trans_no_limit_var,
-            command=self._on_trans_no_limit_changed
-        )
-        self.trans_no_limit_spinbox.pack(side=tk.LEFT, padx=2)
-        self.trans_no_limit_spinbox.bind('<Return>', self._on_trans_no_limit_changed)
+        ttk.Separator(row1, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        # Row 2: Action buttons
-        action_row = ttk.Frame(action_frame)
-        action_row.pack(fill=tk.X)
+        ttk.Button(row1, text="Auto-Reconcile",
+                    command=self._on_auto_reconcile).pack(side=tk.LEFT, padx=3)
 
-        self.confirm_button = ttk.Button(
-            action_row, text="✓ Confirm Match", style='Action.TButton',
-            command=self._on_confirm
-        )
-        self.confirm_button.pack(side=tk.LEFT, padx=5)
+        ttk.Separator(row1, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        self.reject_button = ttk.Button(
-            action_row, text="✗ Reject", style='Action.TButton',
-            command=self._on_reject
-        )
-        self.reject_button.pack(side=tk.LEFT, padx=5)
+        ttk.Button(row1, text="Reports",
+                    command=self._on_reports).pack(side=tk.LEFT, padx=3)
 
-        self.skip_button = ttk.Button(
-            action_row, text="⏭ Skip", style='Action.TButton',
-            command=self._on_skip
-        )
-        self.skip_button.pack(side=tk.LEFT, padx=5)
+        # Row 2: Manual match + resolved
+        row2 = ttk.Frame(action_frame)
+        row2.pack(fill=tk.X, pady=(0, 2))
 
-        # Spacer
-        ttk.Label(action_row, text="    ").pack(side=tk.LEFT)
+        ttk.Label(row2, text="Manual trans_no(s):").pack(side=tk.LEFT, padx=3)
+        self.trans_no_entry = ttk.Entry(row2, width=25)
+        self.trans_no_entry.pack(side=tk.LEFT, padx=3)
+        self.trans_no_entry.bind('<Return>', lambda e: self._on_manual_match())
+        ttk.Button(row2, text="Manual Match",
+                    command=self._on_manual_match).pack(side=tk.LEFT, padx=3)
 
-        ttk.Button(
-            action_row, text="Save Progress",
-            command=self._on_save
-        ).pack(side=tk.LEFT, padx=5)
+        ttk.Separator(row2, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        ttk.Button(
-            action_row, text="Export Results",
-            command=self._on_export
-        ).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row2, text="Resolved comment:").pack(side=tk.LEFT, padx=3)
+        self.resolved_entry = ttk.Entry(row2, width=25)
+        self.resolved_entry.pack(side=tk.LEFT, padx=3)
+        self.resolved_entry.bind('<Return>', lambda e: self._on_mark_resolved())
+        ttk.Button(row2, text="Mark Resolved",
+                    command=self._on_mark_resolved).pack(side=tk.LEFT, padx=3)
 
-        # Date tolerance control
-        ttk.Label(action_row, text="  Date tolerance (days):").pack(side=tk.LEFT, padx=(10, 2))
-        self.date_tolerance_var = tk.IntVar(value=self.system.date_tolerance_days)
-        self.date_tolerance_spinbox = ttk.Spinbox(
-            action_row, from_=1, to=365, width=4,
-            textvariable=self.date_tolerance_var
-        )
-        self.date_tolerance_spinbox.pack(side=tk.LEFT, padx=2)
+        ttk.Separator(row2, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        ttk.Button(
-            action_row, text="Refresh Suggestions",
-            command=self._on_refresh
-        ).pack(side=tk.LEFT, padx=5)
+        # Config controls
+        ttk.Label(row2, text="Date tol:").pack(side=tk.LEFT, padx=(3, 1))
+        self.date_tol_var = tk.IntVar(value=self.system.date_tolerance_days)
+        ttk.Spinbox(row2, from_=1, to=60, width=3,
+                     textvariable=self.date_tol_var,
+                     command=self._on_config_changed).pack(side=tk.LEFT, padx=1)
 
-        ttk.Button(
-            action_row, text="Auto-Confirm",
-            command=self._on_auto_confirm
-        ).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row2, text="Trans limit:").pack(side=tk.LEFT, padx=(5, 1))
+        self.trans_limit_var = tk.IntVar(value=self.system.trans_no_limit)
+        ttk.Spinbox(row2, from_=1, to=20, width=3,
+                     textvariable=self.trans_limit_var,
+                     command=self._on_config_changed).pack(side=tk.LEFT, padx=1)
 
-        # Row 3: Consistency check controls
-        consistency_row = ttk.Frame(action_frame)
-        consistency_row.pack(fill=tk.X, pady=(5, 0))
-
-        ttk.Button(
-            consistency_row, text="Check Consistency",
-            command=self._on_check_consistency
-        ).pack(side=tk.LEFT, padx=5)
-
-        self.prev_issue_button = ttk.Button(
-            consistency_row, text="◄ Prev Issue",
-            command=self._on_prev_inconsistency,
-            state=tk.DISABLED
-        )
-        self.prev_issue_button.pack(side=tk.LEFT, padx=5)
-
-        self.next_issue_button = ttk.Button(
-            consistency_row, text="Next Issue ►",
-            command=self._on_next_inconsistency,
-            state=tk.DISABLED
-        )
-        self.next_issue_button.pack(side=tk.LEFT, padx=5)
-
-        # Related records navigation (for stepping through records in same issue)
-        self.prev_related_button = ttk.Button(
-            consistency_row, text="◄ Related",
-            command=self._on_prev_related,
-            state=tk.DISABLED
-        )
-        self.prev_related_button.pack(side=tk.LEFT, padx=2)
-
-        self.related_label = ttk.Label(
-            consistency_row, text="", foreground='gray', width=8
-        )
-        self.related_label.pack(side=tk.LEFT, padx=2)
-
-        self.next_related_button = ttk.Button(
-            consistency_row, text="Related ►",
-            command=self._on_next_related,
-            state=tk.DISABLED
-        )
-        self.next_related_button.pack(side=tk.LEFT, padx=2)
-
-        self.inconsistency_label = ttk.Label(
-            consistency_row, text="", foreground='gray', wraplength=400
-        )
-        self.inconsistency_label.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
-
-        # Track inconsistencies
-        self.inconsistencies = []  # List of (match, reason, related_matches) tuples
-        self.current_inconsistency_index = 0
-        self.current_related_index = 0  # Index within related_matches
-
-        # Row 4: Manual matching controls
-        manual_row = ttk.Frame(action_frame)
-        manual_row.pack(fill=tk.X, pady=(5, 0))
-
-        ttk.Label(manual_row, text="Manual Match - Trans_no(s):").pack(side=tk.LEFT, padx=5)
-        self.trans_no_entry = ttk.Entry(manual_row, width=30)
-        self.trans_no_entry.pack(side=tk.LEFT, padx=5)
-        self.trans_no_entry.bind('<Return>', lambda e: self._on_create_manual_match())
-
-        self.manual_match_button = ttk.Button(
-            manual_row, text="Create Manual Match",
-            command=self._on_create_manual_match
-        )
-        self.manual_match_button.pack(side=tk.LEFT, padx=5)
-
-        ttk.Label(manual_row, text="  |  ").pack(side=tk.LEFT)
-
-        ttk.Label(manual_row, text="Resolved Comment:").pack(side=tk.LEFT, padx=5)
-        self.resolved_comment_entry = ttk.Entry(manual_row, width=25)
-        self.resolved_comment_entry.pack(side=tk.LEFT, padx=5)
-
-        self.mark_resolved_button = ttk.Button(
-            manual_row, text="Mark as Resolved",
-            command=self._on_mark_resolved
-        )
-        self.mark_resolved_button.pack(side=tk.LEFT, padx=5)
-
-        ttk.Label(manual_row, text="  |  ").pack(side=tk.LEFT)
-
-        self.export_csv_button = ttk.Button(
-            manual_row, text="Reports",
-            command=self._on_export_csvs
-        )
-        self.export_csv_button.pack(side=tk.LEFT, padx=5)
+    # -------------------------------------------------------------------
+    # Display updates
+    # -------------------------------------------------------------------
 
     def _update_display(self):
-        """Update the display for the current match."""
-        if not self.suggestions:
-            self._show_no_matches()
-            return
+        """Update both panels and stats."""
+        self._update_stats()
+        self._update_bank_panel()
+        self._update_beacon_panel()
+        self._update_action_states()
 
-        # Ensure index is valid
-        self.current_index = max(0, min(self.current_index, len(self.suggestions) - 1))
-
-        match = self.suggestions[self.current_index]
-
-        # Check if there's a queued change for this match
-        if match.id in self.queued_changes:
-            display_status = self.queued_changes[match.id]
-        else:
-            display_status = match.status
-
-        # Update progress
-        self.progress_label.config(
-            text=f"Match {self.current_index + 1} of {len(self.suggestions)}"
-        )
-        self.progress_bar['maximum'] = len(self.suggestions)
-        self.progress_bar['value'] = self.current_index + 1
-
-        # Update stats with amounts
+    def _update_stats(self):
+        """Update the stats bar."""
         stats = self.system.get_statistics()
         self.stats_label.config(
-            text=f"Confirmed: {stats['confirmed_matches']} (£{stats['confirmed_amount']:.2f}) | "
-                 f"Pending: {stats['pending_suggestions']} (£{stats['pending_amount']:.2f}) | "
-                 f"Rejected: {stats['rejected_suggestions']} | "
-                 f"Unmatched Bank: {stats['unmatched_bank']} (£{stats['unmatched_bank_amount']:.2f})"
+            text=f"Reconciled: {stats['reconciled_count']} "
+                 f"({chr(163)}{stats['reconciled_amount']:.2f})  |  "
+                 f"Un-reconciled: {stats['unreconciled_count']} "
+                 f"({chr(163)}{stats['unreconciled_amount']:.2f})  |  "
+                 f"Resolved: {stats['resolved_count']} "
+                 f"({chr(163)}{stats['resolved_amount']:.2f})"
         )
-        self.stats_label.update_idletasks()
+        if self.bank_list:
+            self.bank_counter_label.config(
+                text=f"Bank {self.bank_index + 1} / {len(self.bank_list)}"
+            )
+        else:
+            self.bank_counter_label.config(text="No entries")
 
-        # Update status indicator
-        self.status_label.config(text=self.STATUS_LABELS.get(display_status, 'PENDING'))
-        self.bank_status_frame.config(bg=self.COLORS.get(display_status, self.COLORS[MatchStatus.PENDING]))
-        # Force UI refresh
-        self.status_label.update_idletasks()
-        self.bank_status_frame.update_idletasks()
+    def _update_bank_panel(self):
+        """Update the left panel with current bank entry."""
+        bank = self._current_bank()
 
-        # Update match type
-        self.match_type_label.config(text=match.match_type.upper())
+        # Navigation label
+        if self.bank_list:
+            self.bank_nav_label.config(
+                text=f"{self.bank_index + 1} / {len(self.bank_list)}"
+                     f"{'  (all)' if self.show_all_bank else '  (un-reconciled)'}"
+            )
+        else:
+            self.bank_nav_label.config(text="No entries")
 
-        # Update match and bank transaction details
-        self.match_id_label.config(text=match.id)
-        bank = match.bank_transaction
+        # Navigation buttons
+        self.bank_prev_btn.config(state=tk.NORMAL if self.bank_index > 0 else tk.DISABLED)
+        self.bank_next_btn.config(
+            state=tk.NORMAL if self.bank_index < len(self.bank_list) - 1 else tk.DISABLED
+        )
+
+        if not bank:
+            self.bank_id_label.config(text="--")
+            self.bank_date_label.config(text="--")
+            self.bank_type_label.config(text="--")
+            self.bank_desc_label.config(text="No bank entries to show")
+            self.member_lookup_label.config(text="")
+            self.bank_amount_label.config(text="")
+            self.bank_status_label.config(text="")
+            self.bank_status_frame.config(bg='#EEEEEE')
+            self.reconciled_info_frame.pack_forget()
+            self.bank_rec_type_label.config(text="")
+            return
+
+        # Populate fields
         self.bank_id_label.config(text=bank.id)
         self.bank_date_label.config(text=bank.date.strftime('%d-%b-%Y'))
         self.bank_type_label.config(text=bank.type)
         self.bank_desc_label.config(text=bank.description)
-        self.bank_amount_label.config(text=f"£{bank.amount}")
-
-        # Update member lookup
-        member_lookup_text = self.system.get_member_lookup_text(bank.description)
-        self.member_lookup_label.config(text=member_lookup_text)
-
-        # Update confidence display
-        if match.match_type == "manual":
-            self.confidence_label.config(text="Manual Match")
-            self.score_breakdown_label.config(text="(Manually matched by user)")
-        elif match.match_type == "resolved":
-            self.confidence_label.config(text="Manually Resolved")
-            comment_text = match.comment[:50] + "..." if len(match.comment) > 50 else match.comment
-            self.score_breakdown_label.config(text=f"Comment: {comment_text}")
-        else:
-            confidence_pct = int(match.confidence_score * 100)
-            self.confidence_label.config(text=f"{confidence_pct}%")
-            # Score breakdown
-            self.score_breakdown_label.config(
-                text=f"(Amount: {match.amount_score:.0%} | "
-                     f"Date: {match.date_score:.0%} | "
-                     f"Name: {match.name_score:.0%})"
-            )
-
-        # Update beacon entries display
-        self._update_beacon_display(match)
-
-        # Update navigation buttons
-        self.prev_button.config(state=tk.NORMAL if self.current_index > 0 else tk.DISABLED)
-        self.next_button.config(
-            state=tk.NORMAL if self.current_index < len(self.suggestions) - 1 else tk.DISABLED
+        self.bank_amount_label.config(text=f"{chr(163)}{bank.amount}")
+        self.member_lookup_label.config(
+            text=self.system.get_member_lookup_text(bank.description)
         )
 
-        # Update action buttons based on match type
-        has_beacon = len(match.beacon_entries) > 0
-        self.confirm_button.config(state=tk.NORMAL if has_beacon else tk.DISABLED)
+        # Status
+        rec = self.system.get_reconciliation_for_bank(bank.id)
+        if rec:
+            if rec.status == 'manually_resolved':
+                self.bank_status_label.config(text="MANUALLY RESOLVED")
+                self.bank_status_frame.config(bg=self.COLORS['resolved'])
+                self.bank_rec_type_label.config(text=rec.match_type)
+                # Show comment
+                self.reconciled_info_frame.pack(fill=tk.X, pady=(8, 0))
+                self.reconciled_info_label.config(text="No beacon entries (resolved)")
+                self.reconciled_comment_label.config(
+                    text=f"Comment: {rec.comment}" if rec.comment else ""
+                )
+            else:
+                self.bank_status_label.config(text="RECONCILED")
+                self.bank_status_frame.config(bg=self.COLORS['reconciled'])
+                self.bank_rec_type_label.config(text=rec.match_type)
+                # Show reconciled beacon info
+                beacons = self.system.get_beacon_entries_for_reconciliation(rec)
+                if beacons:
+                    lines = []
+                    for b in beacons:
+                        lines.append(
+                            f"{b.trans_no}  {b.date.strftime('%d/%m/%Y')}  "
+                            f"{b.payee}  {chr(163)}{b.amount}"
+                        )
+                    self.reconciled_info_frame.pack(fill=tk.X, pady=(8, 0))
+                    self.reconciled_info_label.config(text="\n".join(lines))
+                    self.reconciled_comment_label.config(text="")
+                else:
+                    self.reconciled_info_frame.pack_forget()
+        else:
+            self.bank_status_label.config(text="UN-RECONCILED")
+            self.bank_status_frame.config(bg=self.COLORS['unreconciled'])
+            self.bank_rec_type_label.config(text="")
+            self.reconciled_info_frame.pack_forget()
 
-    def _update_beacon_display(self, match: MatchSuggestion):
-        """Update beacon entries display for current match."""
-        # Hide all frames first
-        for frame in self.beacon_frames:
-            frame.pack_forget()
+    def _update_beacon_panel(self):
+        """Update the right panel with current beacon candidate."""
+        # Hide everything first
+        self.beacon1_frame.pack_forget()
+        self.beacon2_frame.pack_forget()
         self.total_frame.pack_forget()
-        self.additional_entries_label.pack_forget()
-        self.no_match_label.pack_forget()
+        self.no_candidates_label.pack_forget()
+        self.rejected_indicator.pack_forget()
 
-        if not match.beacon_entries:
-            # No beacon entries - either no match found or manually resolved
-            if match.match_type == "resolved":
-                self.no_match_label.config(
-                    text="Manually Resolved\n\nNo beacon entries linked.\nSee comment for resolution details.",
-                    foreground='gray',
-                    font=('Segoe UI', 10)
-                )
-            else:
-                # Make "No match found" stand out with larger font
-                self.no_match_label.config(
-                    text="⚠ NO MATCH FOUND ⚠\n\nUse manual matching to link beacon entries by trans_no,\nor mark as resolved.",
-                    foreground='gray',
-                    font=('Segoe UI', 12, 'bold')
-                )
-            self.no_match_label.pack(fill=tk.X, pady=(10, 0))
+        bank = self._current_bank()
+
+        # If bank is reconciled, show reconciled beacon info instead
+        if bank and self.system.is_bank_reconciled(bank.id):
+            rec = self.system.get_reconciliation_for_bank(bank.id)
+            if rec and rec.status == 'manually_resolved':
+                self.no_candidates_label.config(text="Manually resolved\n(see left panel)")
+                self.no_candidates_label.pack(fill=tk.BOTH, expand=True, pady=20)
+            elif rec:
+                beacons = self.system.get_beacon_entries_for_reconciliation(rec)
+                if beacons:
+                    self._populate_beacon_widgets(self.beacon1_widgets, beacons[0])
+                    self.beacon1_frame.pack(fill=tk.X, pady=(0, 5))
+                    if len(beacons) > 1:
+                        self._populate_beacon_widgets(self.beacon2_widgets, beacons[1])
+                        self.beacon2_frame.pack(fill=tk.X, pady=(0, 5))
+                        total = sum(b.amount for b in beacons)
+                        self.beacon_total_label.config(text=f"{chr(163)}{total}")
+                        self.total_frame.pack(fill=tk.X, pady=(5, 0))
+            # Nav info
+            self.beacon_nav_label.config(text="Reconciled")
+            self.confidence_label.config(text="")
+            self.match_type_label.config(text="")
+            self.score_breakdown_label.config(text="")
+            self.beacon_prev_btn.config(state=tk.DISABLED)
+            self.beacon_next_btn.config(state=tk.DISABLED)
             return
 
-        # Show first 2 beacon entries
-        total_amount = 0
-        displayed_count = min(2, len(match.beacon_entries))
-        for i in range(displayed_count):
-            beacon = match.beacon_entries[i]
-            widgets = self.beacon_widgets[i]
-            widgets['id'].config(text=beacon.id)
-            widgets['trans_no'].config(text=beacon.trans_no)
-            widgets['date'].config(text=beacon.date.strftime('%d/%m/%Y'))
-            widgets['payee'].config(text=beacon.payee)
-            widgets['detail'].config(text=beacon.detail)
-            widgets['amount'].config(text=f"£{beacon.amount}")
+        # Handle beacon search results mode
+        if self.beacon_search_active and self.beacon_search_results:
+            self._show_beacon_search_result()
+            return
 
-            self.beacon_frames[i].pack(fill=tk.X, pady=(0, 10))
+        # Normal candidate mode
+        if not self.candidates:
+            self.no_candidates_label.config(
+                text="No beacon candidates found\n\n"
+                     "Use manual trans_no match\nor mark as resolved"
+            )
+            self.no_candidates_label.pack(fill=tk.BOTH, expand=True, pady=20)
+            self.beacon_nav_label.config(text="0 / 0")
+            self.confidence_label.config(text="")
+            self.match_type_label.config(text="")
+            self.score_breakdown_label.config(text="")
+            self.beacon_prev_btn.config(state=tk.DISABLED)
+            self.beacon_next_btn.config(state=tk.DISABLED)
+            return
 
-        # Calculate total from ALL beacon entries
-        total_amount = sum(float(b.amount) for b in match.beacon_entries)
+        # Show current candidate
+        candidate = self._current_candidate()
+        if not candidate:
+            return
 
-        # Show additional entries indicator if more than 2
-        if len(match.beacon_entries) > 2:
-            extra_entries = match.beacon_entries[2:]
-            extra_details = [f"{b.trans_no} (£{b.amount})" for b in extra_entries]
-            extra_text = f"+ {len(extra_entries)} more: {', '.join(extra_details)}"
-            self.additional_entries_label.config(text=extra_text)
-            self.additional_entries_label.pack(fill=tk.X, pady=(0, 5))
-
-        # Show total for matches with 2+ entries
-        if len(match.beacon_entries) >= 2:
-            self.beacon_total_label.config(text=f"£{total_amount:.2f}")
-            self.total_frame.pack(fill=tk.X, pady=(10, 0))
-
-    def _show_no_matches(self):
-        """Show message when there are no matches to review."""
-        messagebox.showinfo(
-            "No Matches",
-            "No match suggestions available.\n\n"
-            "Either all bank transactions have been matched,\n"
-            "or no suitable matches were found."
+        # Navigation
+        self.beacon_nav_label.config(
+            text=f"{self.candidate_index + 1} / {len(self.candidates)}"
+        )
+        self.beacon_prev_btn.config(
+            state=tk.NORMAL if self.candidate_index > 0 else tk.DISABLED
+        )
+        self.beacon_next_btn.config(
+            state=tk.NORMAL if self.candidate_index < len(self.candidates) - 1 else tk.DISABLED
         )
 
-    def _should_skip_match(self, match):
-        """Check if a match should be skipped based on current settings."""
-        # Treat MANUAL_MATCH and MANUALLY_RESOLVED as confirmed for skipping purposes
-        if self.skip_confirmed_var.get() and match.status in (
-            MatchStatus.CONFIRMED, MatchStatus.MANUAL_MATCH, MatchStatus.MANUALLY_RESOLVED
-        ):
-            return True
-        if self.skip_rejected_var.get() and match.status == MatchStatus.REJECTED:
-            return True
-        return False
+        # Confidence
+        pct = int(candidate.confidence_score * 100)
+        self.confidence_label.config(text=f"{pct}% confidence")
+        self.match_type_label.config(text=candidate.match_type)
+        self.score_breakdown_label.config(
+            text=f"Amt: {candidate.amount_score:.0%}  "
+                 f"Date: {candidate.date_score:.0%}  "
+                 f"Name: {candidate.name_score:.0%}"
+        )
 
-    def _on_previous(self):
-        """Navigate to previous match."""
-        if self.current_index > 0:
-            self.current_index -= 1
-            # Skip confirmed/rejected matches if checkboxes are checked
-            while self.current_index > 0:
-                match = self.suggestions[self.current_index]
-                if not self._should_skip_match(match):
-                    break
-                self.current_index -= 1
+        # Rejected indicator
+        if candidate.is_rejected:
+            self.rejected_indicator.pack(fill=tk.X, pady=(0, 5))
+
+        # Beacon entry 1
+        self._populate_beacon_widgets(self.beacon1_widgets, candidate.beacon_entries[0])
+        self.beacon1_frame.pack(fill=tk.X, pady=(0, 5))
+
+        # Beacon entry 2 (1-to-2)
+        if len(candidate.beacon_entries) > 1:
+            self._populate_beacon_widgets(self.beacon2_widgets, candidate.beacon_entries[1])
+            self.beacon2_frame.pack(fill=tk.X, pady=(0, 5))
+            total = sum(b.amount for b in candidate.beacon_entries)
+            self.beacon_total_label.config(text=f"{chr(163)}{total}")
+            self.total_frame.pack(fill=tk.X, pady=(5, 0))
+
+    def _populate_beacon_widgets(self, widgets, beacon: BeaconEntry):
+        """Fill a set of beacon widgets with data from a BeaconEntry."""
+        widgets['trans_no'].config(text=beacon.trans_no)
+        widgets['date'].config(text=beacon.date.strftime('%d/%m/%Y'))
+        widgets['payee'].config(text=beacon.payee)
+        widgets['detail'].config(text=beacon.detail)
+        widgets['member_1'].config(text=beacon.member_1 or "--")
+        widgets['member_2'].config(text=beacon.member_2 or "--")
+        widgets['amount'].config(text=f"{chr(163)}{beacon.amount}")
+        widgets['id'].config(text=beacon.id)
+
+    def _show_beacon_search_result(self):
+        """Show beacon search results in the right panel."""
+        if not self.beacon_search_results:
+            return
+        idx = min(self.candidate_index, len(self.beacon_search_results) - 1)
+        beacon = self.beacon_search_results[idx]
+
+        self.beacon_nav_label.config(
+            text=f"Search {idx + 1} / {len(self.beacon_search_results)}"
+        )
+        self.beacon_prev_btn.config(state=tk.NORMAL if idx > 0 else tk.DISABLED)
+        self.beacon_next_btn.config(
+            state=tk.NORMAL if idx < len(self.beacon_search_results) - 1 else tk.DISABLED
+        )
+        self.confidence_label.config(text="Search result")
+        self.match_type_label.config(text="")
+        self.score_breakdown_label.config(text="")
+
+        self._populate_beacon_widgets(self.beacon1_widgets, beacon)
+        self.beacon1_frame.pack(fill=tk.X, pady=(0, 5))
+
+    def _update_action_states(self):
+        """Enable/disable action buttons based on current state."""
+        bank = self._current_bank()
+        is_reconciled = bank and self.system.is_bank_reconciled(bank.id)
+        has_candidate = self._current_candidate() is not None
+        candidate = self._current_candidate()
+
+        # Reconcile: enabled if bank not reconciled and there's a candidate
+        self.reconcile_btn.config(
+            state=tk.NORMAL if bank and not is_reconciled and has_candidate else tk.DISABLED
+        )
+
+        # Un-reconcile: enabled if bank IS reconciled
+        self.unreconcile_btn.config(
+            state=tk.NORMAL if is_reconciled else tk.DISABLED
+        )
+
+        # Reject: enabled if bank not reconciled and there's a non-rejected candidate
+        can_reject = (bank and not is_reconciled and candidate
+                      and not candidate.is_rejected)
+        self.reject_btn.config(state=tk.NORMAL if can_reject else tk.DISABLED)
+
+        # Un-reject: enabled if candidate is rejected
+        can_unreject = (bank and not is_reconciled and candidate
+                        and candidate.is_rejected)
+        self.unreject_btn.config(state=tk.NORMAL if can_unreject else tk.DISABLED)
+
+    # -------------------------------------------------------------------
+    # Bank navigation
+    # -------------------------------------------------------------------
+
+    def _on_bank_prev(self):
+        """Navigate to previous bank entry."""
+        if self.bank_index > 0:
+            self.bank_index -= 1
+            self._refresh_candidates()
             self._update_display()
 
-    def _on_next(self):
-        """Navigate to next match."""
-        if self.current_index < len(self.suggestions) - 1:
-            self.current_index += 1
-            # Skip confirmed/rejected matches if checkboxes are checked
-            while self.current_index < len(self.suggestions) - 1:
-                match = self.suggestions[self.current_index]
-                if not self._should_skip_match(match):
-                    break
-                self.current_index += 1
+    def _on_bank_next(self):
+        """Navigate to next bank entry."""
+        if self.bank_index < len(self.bank_list) - 1:
+            self.bank_index += 1
+            self._refresh_candidates()
             self._update_display()
-
-    def _on_jump(self, event=None):
-        """Jump to a specific match number."""
-        try:
-            target = int(self.jump_entry.get()) - 1
-            if 0 <= target < len(self.suggestions):
-                self.current_index = target
-                self._update_display()
-            else:
-                messagebox.showwarning(
-                    "Invalid Index",
-                    f"Please enter a number between 1 and {len(self.suggestions)}"
-                )
-        except ValueError:
-            messagebox.showwarning("Invalid Input", "Please enter a valid number")
-
-    def _on_confirm(self):
-        """Confirm the current match."""
-        if not self.suggestions:
-            return
-
-        match = self.suggestions[self.current_index]
-        print(f"[DEBUG] Confirming match {match.id}, was status={match.status}")
-
-        # Queue the change (will be applied when moving forward or saving)
-        self.queued_changes[match.id] = MatchStatus.CONFIRMED
-        self._auto_save()
-
-        # Verify the change was applied
-        current_match = self.suggestions[self.current_index]
-        print(f"[DEBUG] After confirm: match {current_match.id}, now status={current_match.status}")
-
-        self._update_display()
-
-        # Refresh inconsistency check if we were viewing inconsistencies
-        if self.inconsistencies:
-            self.inconsistencies = self.system.check_consistency()
-            self._update_inconsistency_ui()
-
-        # Auto-advance to next (but not when show_all is enabled - let user see status change)
-        if not self.show_all_var.get() and self.current_index < len(self.suggestions) - 1:
-            self._on_next()
-
-    def _on_reject(self):
-        """Reject the current match."""
-        if not self.suggestions:
-            return
-
-        match = self.suggestions[self.current_index]
-        print(f"[DEBUG] Rejecting match {match.id}, was status={match.status}")
-
-        # Remember the bank transaction ID before rejecting
-        rejected_bank_id = match.bank_transaction.id
-
-        self.queued_changes[match.id] = MatchStatus.REJECTED
-        self._auto_save()
-
-        # Verify the change was applied
-        current_match = self.suggestions[self.current_index]
-        print(f"[DEBUG] After reject: match {current_match.id}, now status={current_match.status}")
-
-        self._update_display()
-
-        # Refresh inconsistency check if we were viewing inconsistencies
-        if self.inconsistencies:
-            self.inconsistencies = self.system.check_consistency()
-            self._update_inconsistency_ui()
-
-        # Auto-advance: first look for another match for the same bank transaction
-        if not self.show_all_var.get() and self.current_index < len(self.suggestions) - 1:
-            # Look for next pending match with same bank transaction
-            found_same_bank = False
-            for i in range(self.current_index + 1, len(self.suggestions)):
-                candidate = self.suggestions[i]
-                if candidate.bank_transaction.id == rejected_bank_id:
-                    if candidate.status == MatchStatus.PENDING:
-                        self.current_index = i
-                        found_same_bank = True
-                        self._update_display()
-                        break
-
-            # If no other match for same bank, advance normally
-            if not found_same_bank:
-                self._on_next()
-
-    def _on_skip(self):
-        """Skip the current match."""
-        if not self.suggestions:
-            return
-
-        match = self.suggestions[self.current_index]
-        self.queued_changes[match.id] = MatchStatus.SKIPPED
-        self._auto_save()
-        self._update_display()
-
-        # Auto-advance
-        if self.current_index < len(self.suggestions) - 1:
-            self._on_next()
-
-    def _auto_save(self):
-        """Auto-save progress without showing a message."""
-        self._apply_queued_changes()
-        self.system.save_state()
-
-    def _apply_queued_changes(self):
-        """Apply all queued status changes."""
-        changes_made = False
-        updated_match = None  # Track the match we actually updated
-
-        for match_id, new_status in self.queued_changes.items():
-            # Find the match at current_index first (most likely case)
-            if self.current_index < len(self.suggestions):
-                current = self.suggestions[self.current_index]
-                if current.id == match_id:
-                    self.system.update_match_status(current, new_status)
-                    changes_made = True
-                    updated_match = current
-                    print(f"[DEBUG] Applied {new_status} to {match_id} at current_index {self.current_index}")
-                    continue
-
-            # If not at current_index, search for it
-            for match in self.suggestions:
-                if match.id == match_id:
-                    self.system.update_match_status(match, new_status)
-                    changes_made = True
-                    updated_match = match
-                    print(f"[DEBUG] Applied {new_status} to {match_id} (found by search)")
-                    break
-
-        self.queued_changes.clear()
-
-        # Re-sort suggestions after status changes to maintain correct order
-        if changes_made and self.suggestions:
-            # Use the match we actually updated, not the one at current_index
-            current_match = updated_match if updated_match else (
-                self.suggestions[self.current_index] if self.current_index < len(self.suggestions) else None
-            )
-            old_index = self.current_index
-            self.system._sort_suggestions()
-            # Try to maintain position on the same match after re-sort
-            if current_match:
-                try:
-                    self.current_index = self.suggestions.index(current_match)
-                    print(f"[DEBUG] Reindex: {old_index} -> {self.current_index}, match {current_match.id} now {current_match.status}")
-                except ValueError:
-                    self.current_index = min(self.current_index, len(self.suggestions) - 1)
-                    print(f"[DEBUG] Match not found after sort, staying at index {self.current_index}")
-
-    def _on_save(self):
-        """Save current progress."""
-        self._apply_queued_changes()
-        self.system.save_state()
-        messagebox.showinfo("Saved", "Progress saved successfully!")
-
-    def _on_export(self):
-        """Export results to CSV."""
-        self._apply_queued_changes()
-        self.system.export_results()
-        messagebox.showinfo(
-            "Exported",
-            "Results exported to reconciliation_results.csv"
-        )
-
-    def _on_refresh(self):
-        """Refresh suggestions after applying changes."""
-        self._apply_queued_changes()
-        self.system.save_state()
-
-        # Regenerate suggestions with current settings
-        include_confirmed = self.show_all_var.get()
-        trans_no_limit = self.trans_no_limit_var.get()
-        date_tolerance = self.date_tolerance_var.get()
-        self.suggestions = self.system.generate_suggestions(
-            include_confirmed=include_confirmed,
-            trans_no_limit=trans_no_limit,
-            date_tolerance_days=date_tolerance
-        )
-        self.current_index = 0
-
-        self._update_display()
-        messagebox.showinfo(
-            "Refreshed",
-            f"Generated {len(self.suggestions)} match suggestions\n"
-            f"(Date tolerance: {date_tolerance} days)"
-        )
-
-    def _on_auto_confirm(self):
-        """Run auto-confirmation on pending matches."""
-        self._apply_queued_changes()
-
-        # Run auto-confirmation
-        count = self.system.run_auto_confirm()
-
-        if count > 0:
-            # Save state after auto-confirmation
-            self.system.save_state()
-
-            # Re-sort suggestions to reflect new confirmed status
-            self.system._sort_suggestions()
-
-            self._update_display()
-            messagebox.showinfo(
-                "Auto-Confirm Complete",
-                f"Auto-confirmed {count} high-confidence matches"
-            )
-        else:
-            messagebox.showinfo(
-                "Auto-Confirm Complete",
-                "No matches met the auto-confirmation thresholds"
-            )
-
-    def _parse_search_date(self, date_str: str):
-        """Try to parse a date string in various formats.
-
-        Returns datetime if successful, None otherwise.
-        Supports: DD/MM/YYYY, DD-MM-YYYY, DD MM YYYY, DD-Mon-YYYY, YYYY-MM-DD
-        """
-        from datetime import datetime
-        formats = [
-            '%d/%m/%Y',      # 17/03/2025
-            '%d-%m-%Y',      # 17-03-2025
-            '%d/%m/%y',      # 17/03/25
-            '%d-%m-%y',      # 17-03-25
-            '%d %b %Y',      # 17 Mar 2025
-            '%d %B %Y',      # 17 March 2025
-            '%d-%b-%Y',      # 17-Mar-2025
-            '%d-%b-%y',      # 17-Mar-25
-            '%Y-%m-%d',      # 2025-03-17
-        ]
-        for fmt in formats:
-            try:
-                return datetime.strptime(date_str, fmt)
-            except ValueError:
-                continue
-        return None
-
-    def _detect_search_type(self, search_term: str):
-        """Detect the type of search based on the search term.
-
-        Returns tuple of (search_type, parsed_value) where search_type is one of:
-        - 'quoted': literal string search (parsed_value = unquoted string)
-        - 'match_id': exact Match ID search
-        - 'bank_id': exact Bank ID search
-        - 'beacon_id': exact Beacon ID search
-        - 'date': date search (parsed_value = datetime)
-        - 'amount': amount search (parsed_value = Decimal)
-        - 'name': name/description search (parsed_value = lowercase search term)
-        """
-        from decimal import Decimal, InvalidOperation
-
-        term = search_term.strip()
-
-        # 1. Check for quoted string (literal search)
-        if term.startswith('"') and term.endswith('"') and len(term) > 2:
-            return ('quoted', term[1:-1])
-
-        # 2. Check for ID prefixes (exact match)
-        upper_term = term.upper()
-        if upper_term.startswith('MATCH_') or upper_term.startswith('MANUAL_') or upper_term.startswith('RESOLVED_'):
-            return ('match_id', upper_term)
-        if upper_term.startswith('BANK_'):
-            return ('bank_id', upper_term)
-        if upper_term.startswith('BEACON_'):
-            return ('beacon_id', upper_term)
-        if upper_term.startswith('TR_'):
-            # Trans_no search - remove prefix and search beacon trans_no
-            return ('trans_no', term[3:])  # Keep original case for trans_no
-
-        # 3. Check for date
-        parsed_date = self._parse_search_date(term)
-        if parsed_date:
-            return ('date', parsed_date)
-
-        # 4. Check for amount (number, possibly with £ prefix)
-        amount_str = term.lstrip('£').strip()
-        try:
-            # Try to parse as decimal
-            amount = Decimal(amount_str)
-            return ('amount', amount)
-        except InvalidOperation:
-            pass
-
-        # 5. Default to name search
-        return ('name', term.lower())
-
-    def _on_search(self, event=None):
-        """Search for matches by various criteria with auto-detection.
-
-        Supports:
-        - "quoted text": Literal string search in description/payee
-        - MATCH_*, BANK_*, BEACON_*: Exact ID search
-        - Date formats (17/03/2025, etc.): Date search
-        - Numbers or £amounts: Amount search
-        - Other text: Name/description substring search
-        """
-        search_term = self.search_entry.get().strip()
-        if not search_term:
-            self.search_result_label.config(text="Enter search term")
-            return
-
-        search_type, parsed_value = self._detect_search_type(search_term)
-        self.search_matches = []
-
-        for i, match in enumerate(self.suggestions):
-            bank = match.bank_transaction
-            beacons = match.beacon_entries
-
-            if search_type == 'quoted':
-                # Literal string search in description and payee
-                search_lower = parsed_value.lower()
-                if search_lower in bank.description.lower():
-                    self.search_matches.append(i)
-                    continue
-                for beacon in beacons:
-                    if search_lower in beacon.payee.lower():
-                        self.search_matches.append(i)
-                        break
-
-            elif search_type == 'match_id':
-                # Exact match ID search
-                if match.id.upper() == parsed_value:
-                    self.search_matches.append(i)
-
-            elif search_type == 'bank_id':
-                # Exact bank ID search
-                if bank.id.upper() == parsed_value:
-                    self.search_matches.append(i)
-
-            elif search_type == 'beacon_id':
-                # Exact beacon ID search
-                for beacon in beacons:
-                    if beacon.id.upper() == parsed_value:
-                        self.search_matches.append(i)
-                        break
-
-            elif search_type == 'trans_no':
-                # Trans_no search - exact match on beacon trans_no
-                for beacon in beacons:
-                    if beacon.trans_no == parsed_value:
-                        self.search_matches.append(i)
-                        break
-
-            elif search_type == 'date':
-                # Date search - match bank date or any beacon date
-                if bank.date.date() == parsed_value.date():
-                    self.search_matches.append(i)
-                    continue
-                for beacon in beacons:
-                    if beacon.date.date() == parsed_value.date():
-                        self.search_matches.append(i)
-                        break
-
-            elif search_type == 'amount':
-                # Amount search - match bank amount or any beacon amount
-                if bank.amount == parsed_value:
-                    self.search_matches.append(i)
-                    continue
-                for beacon in beacons:
-                    if beacon.amount == parsed_value:
-                        self.search_matches.append(i)
-                        break
-
-            else:  # 'name' - default substring search
-                # Search in bank description
-                if parsed_value in bank.description.lower():
-                    self.search_matches.append(i)
-                    continue
-                # Search in beacon payees
-                for beacon in beacons:
-                    if parsed_value in beacon.payee.lower():
-                        self.search_matches.append(i)
-                        break
-
-        if self.search_matches:
-            self.search_index = 0
-            self.current_index = self.search_matches[0]
-            self._update_display()
-            # Show search type in result
-            type_labels = {
-                'quoted': 'text',
-                'match_id': 'Match ID',
-                'bank_id': 'Bank ID',
-                'beacon_id': 'Beacon ID',
-                'trans_no': 'trans_no',
-                'date': 'date',
-                'amount': 'amount',
-                'name': 'name'
-            }
-            self.search_result_label.config(
-                text=f"Found {len(self.search_matches)} ({type_labels[search_type]}) (1/{len(self.search_matches)})",
-                foreground='gray'
-            )
-        else:
-            self.search_result_label.config(text="No matches found", foreground='#CC0000')
-
-    def _on_search_next(self):
-        """Go to next search result."""
-        if not self.search_matches:
-            self.search_result_label.config(text="No search results")
-            return
-
-        self.search_index = (self.search_index + 1) % len(self.search_matches)
-        self.current_index = self.search_matches[self.search_index]
-        self._update_display()
-        self.search_result_label.config(
-            text=f"Found {len(self.search_matches)} matches ({self.search_index + 1}/{len(self.search_matches)})"
-        )
-
-    def _on_search_prev(self):
-        """Go to previous search result."""
-        if not self.search_matches:
-            self.search_result_label.config(text="No search results")
-            return
-
-        self.search_index = (self.search_index - 1) % len(self.search_matches)
-        self.current_index = self.search_matches[self.search_index]
-        self._update_display()
-        self.search_result_label.config(
-            text=f"Found {len(self.search_matches)} matches ({self.search_index + 1}/{len(self.search_matches)})"
-        )
-
-    def _on_search_clear(self):
-        """Clear search."""
-        self.search_entry.delete(0, tk.END)
-        self.search_matches = []
-        self.search_index = 0
-        self.search_result_label.config(text="")
 
     def _on_show_all_changed(self):
-        """Handle show all transactions checkbox change."""
-        self._apply_queued_changes()
-        self.system.save_state()
-
-        # Regenerate suggestions with new setting
-        include_confirmed = self.show_all_var.get()
-        trans_no_limit = self.trans_no_limit_var.get()
-        date_tolerance = self.date_tolerance_var.get()
-        self.suggestions = self.system.generate_suggestions(
-            include_confirmed=include_confirmed,
-            trans_no_limit=trans_no_limit,
-            date_tolerance_days=date_tolerance
-        )
-        self.current_index = 0
-
+        """Toggle showing all vs un-reconciled only."""
+        self.show_all_bank = self.show_all_var.get()
+        # Try to stay on the same bank entry
+        current_bank = self._current_bank()
+        self._rebuild_bank_list()
+        if current_bank:
+            for i, b in enumerate(self.bank_list):
+                if b.id == current_bank.id:
+                    self.bank_index = i
+                    break
+        self._refresh_candidates()
         self._update_display()
 
-    def _on_trans_no_limit_changed(self, event=None):
-        """Handle trans_no limit change - regenerate suggestions."""
-        self._apply_queued_changes()
-        self.system.save_state()
+    # -------------------------------------------------------------------
+    # Candidate navigation
+    # -------------------------------------------------------------------
 
-        # Regenerate suggestions with new trans_no limit
-        include_confirmed = self.show_all_var.get()
-        trans_no_limit = self.trans_no_limit_var.get()
-        date_tolerance = self.date_tolerance_var.get()
-        self.suggestions = self.system.generate_suggestions(
-            include_confirmed=include_confirmed,
-            trans_no_limit=trans_no_limit,
-            date_tolerance_days=date_tolerance
-        )
-        self.current_index = 0
+    def _on_candidate_prev(self):
+        """Navigate to previous beacon candidate."""
+        if self.beacon_search_active:
+            if self.candidate_index > 0:
+                self.candidate_index -= 1
+                self._update_beacon_panel()
+                self._update_action_states()
+            return
 
+        if self.candidate_index > 0:
+            self.candidate_index -= 1
+            self._update_beacon_panel()
+            self._update_action_states()
+
+    def _on_candidate_next(self):
+        """Navigate to next beacon candidate."""
+        if self.beacon_search_active:
+            if self.candidate_index < len(self.beacon_search_results) - 1:
+                self.candidate_index += 1
+                self._update_beacon_panel()
+                self._update_action_states()
+            return
+
+        if self.candidate_index < len(self.candidates) - 1:
+            self.candidate_index += 1
+            self._update_beacon_panel()
+            self._update_action_states()
+
+    # -------------------------------------------------------------------
+    # Actions
+    # -------------------------------------------------------------------
+
+    def _on_reconcile(self):
+        """Reconcile current bank entry with current candidate."""
+        bank = self._current_bank()
+        candidate = self._current_candidate()
+        if not bank or not candidate:
+            return
+
+        success, message = self.system.reconcile(bank, candidate)
+        if success:
+            # Move to next un-reconciled bank entry
+            self._rebuild_bank_list()
+            self._refresh_candidates()
+            self._update_display()
+        else:
+            messagebox.showerror("Reconcile Failed", message)
+
+    def _on_unreconcile(self):
+        """Un-reconcile current bank entry."""
+        bank = self._current_bank()
+        if not bank:
+            return
+
+        success, message = self.system.unreconcile(bank.id)
+        if success:
+            self._rebuild_bank_list()
+            # Stay on same bank entry
+            for i, b in enumerate(self.bank_list):
+                if b.id == bank.id:
+                    self.bank_index = i
+                    break
+            self._refresh_candidates()
+            self._update_display()
+        else:
+            messagebox.showerror("Un-reconcile Failed", message)
+
+    def _on_reject_pairing(self):
+        """Reject current pairing (bank + beacon candidate)."""
+        bank = self._current_bank()
+        candidate = self._current_candidate()
+        if not bank or not candidate:
+            return
+
+        for beacon in candidate.beacon_entries:
+            self.system.reject_pairing(bank.id, beacon.id)
+
+        # Refresh candidates (rejected will move to bottom)
+        self._refresh_candidates()
         self._update_display()
 
-    def _on_check_consistency(self):
-        """Run consistency check and navigate to first inconsistency if found."""
-        self._run_consistency_check()
+    def _on_unreject_pairing(self):
+        """Un-reject current pairing."""
+        bank = self._current_bank()
+        candidate = self._current_candidate()
+        if not bank or not candidate:
+            return
 
-    def _run_consistency_check(self, show_message_if_clean=True):
-        """Run consistency check with optional progress dialog.
+        for beacon in candidate.beacon_entries:
+            self.system.unreject_pairing(bank.id, beacon.id)
 
-        Args:
-            show_message_if_clean: If True, show a message box when no issues found
-        """
-        # For large datasets, show progress dialog
-        confirmed_count = len(self.system.confirmed_matches)
+        # Refresh candidates
+        self._refresh_candidates()
+        self._update_display()
 
-        if confirmed_count > 100:
-            # Create progress dialog
-            progress_window = tk.Toplevel(self.master)
-            progress_window.title("Checking Consistency")
-            progress_window.geometry("400x100")
-            progress_window.transient(self.master)
-            progress_window.grab_set()
+    def _on_auto_reconcile(self):
+        """Run auto-reconcile."""
+        count = self.system.auto_reconcile()
+        self._rebuild_bank_list()
+        self._refresh_candidates()
+        self._update_display()
 
-            # Center the dialog
-            progress_window.update_idletasks()
-            x = self.master.winfo_x() + (self.master.winfo_width() - 400) // 2
-            y = self.master.winfo_y() + (self.master.winfo_height() - 100) // 2
-            progress_window.geometry(f"+{x}+{y}")
-
-            ttk.Label(progress_window, text="Checking consistency...",
-                      font=('Segoe UI', 11)).pack(pady=(15, 5))
-
-            progress_bar = ttk.Progressbar(progress_window, length=350, mode='determinate')
-            progress_bar.pack(pady=10)
-
-            def update_progress(current, total, message):
-                progress_bar['maximum'] = total
-                progress_bar['value'] = current
-                progress_window.update()
-
-            self.inconsistencies = self.system.check_consistency(progress_callback=update_progress)
-            progress_window.destroy()
+        if count > 0:
+            messagebox.showinfo("Auto-Reconcile",
+                                f"Auto-reconciled {count} entries.\n\n"
+                                f"Use Un-reconcile to undo any incorrect matches.")
         else:
-            self.inconsistencies = self.system.check_consistency()
+            messagebox.showinfo("Auto-Reconcile",
+                                "No entries met the auto-reconcile thresholds.")
 
-        self.current_inconsistency_index = 0
-        self._update_inconsistency_ui()
-
-        if self.inconsistencies:
-            # Navigate to first inconsistency
-            self._navigate_to_inconsistency(0)
-        elif show_message_if_clean:
-            messagebox.showinfo("Consistency Check", "No inconsistencies found.")
-
-    def _update_inconsistency_ui(self):
-        """Update the inconsistency navigation UI based on current state."""
-        if not self.inconsistencies:
-            self.prev_issue_button.config(state=tk.DISABLED)
-            self.next_issue_button.config(state=tk.DISABLED)
-            self.prev_related_button.config(state=tk.DISABLED)
-            self.next_related_button.config(state=tk.DISABLED)
-            self.related_label.config(text="")
-            self.inconsistency_label.config(text="No inconsistencies found", foreground='green')
-        else:
-            count = len(self.inconsistencies)
-            current = self.current_inconsistency_index + 1
-            match, reason, related_matches = self.inconsistencies[self.current_inconsistency_index]
-
-            # Truncate very long messages (120 chars)
-            if len(reason) > 120:
-                reason = reason[:120] + "..."
-            self.inconsistency_label.config(
-                text=f"Issue {current}/{count}: {reason}",
-                foreground='red'
-            )
-
-            # Enable/disable issue navigation buttons
-            self.prev_issue_button.config(
-                state=tk.NORMAL if self.current_inconsistency_index > 0 else tk.DISABLED
-            )
-            self.next_issue_button.config(
-                state=tk.NORMAL if self.current_inconsistency_index < count - 1 else tk.DISABLED
-            )
-
-            # Update related records navigation
-            num_related = len(related_matches)
-            if num_related > 1:
-                # Find current position in related matches
-                current_match = self.suggestions[self.current_index] if self.current_index < len(self.suggestions) else None
-                if current_match:
-                    for i, rm in enumerate(related_matches):
-                        if rm.id == current_match.id:
-                            self.current_related_index = i
-                            break
-
-                self.related_label.config(text=f"{self.current_related_index + 1}/{num_related}")
-                self.prev_related_button.config(
-                    state=tk.NORMAL if self.current_related_index > 0 else tk.DISABLED
-                )
-                self.next_related_button.config(
-                    state=tk.NORMAL if self.current_related_index < num_related - 1 else tk.DISABLED
-                )
-            else:
-                # Only one related match, disable related navigation
-                self.related_label.config(text="")
-                self.prev_related_button.config(state=tk.DISABLED)
-                self.next_related_button.config(state=tk.DISABLED)
-
-        # Force UI refresh
-        self.inconsistency_label.update_idletasks()
-
-    def _navigate_to_inconsistency(self, index):
-        """Navigate to a specific inconsistency by index."""
-        if not self.inconsistencies or index < 0 or index >= len(self.inconsistencies):
+    def _on_manual_match(self):
+        """Create manual match from trans_no(s)."""
+        bank = self._current_bank()
+        if not bank:
+            messagebox.showerror("Error", "No bank entry selected")
             return
 
-        self.current_inconsistency_index = index
-        self.current_related_index = 0  # Reset to first related match
-        match, reason, related_matches = self.inconsistencies[index]
-
-        # Find the match in the suggestions list
-        # First, ensure we're showing all transactions (including confirmed)
-        if not self.show_all_var.get():
-            self.show_all_var.set(True)
-            self._on_show_all_changed()
-
-        # Find the match index in suggestions
-        match_index = self.system.find_match_in_suggestions(match)
-        if match_index >= 0:
-            self.current_index = match_index
-            self._update_display()
-
-        self._update_inconsistency_ui()
-
-    def _on_prev_inconsistency(self):
-        """Navigate to previous inconsistency (re-checks for accuracy)."""
-        # Re-run consistency check to get updated list
-        self.inconsistencies = self.system.check_consistency()
-
-        if not self.inconsistencies:
-            self._update_inconsistency_ui()
+        if self.system.is_bank_reconciled(bank.id):
+            messagebox.showerror("Error", "Bank entry is already reconciled.\n"
+                                 "Un-reconcile first if you want to change it.")
             return
 
-        # Find current match in new inconsistency list or go to previous
-        new_index = max(0, self.current_inconsistency_index - 1)
-        if new_index >= len(self.inconsistencies):
-            new_index = len(self.inconsistencies) - 1
-
-        self._navigate_to_inconsistency(new_index)
-
-    def _on_next_inconsistency(self):
-        """Navigate to next inconsistency (re-checks for accuracy)."""
-        # Re-run consistency check to get updated list
-        self.inconsistencies = self.system.check_consistency()
-
-        if not self.inconsistencies:
-            self._update_inconsistency_ui()
+        text = self.trans_no_entry.get().strip()
+        if not text:
+            messagebox.showerror("Error", "Enter one or more trans_no values (comma-separated)")
             return
 
-        # Move to next or stay at end
-        new_index = self.current_inconsistency_index + 1
-        if new_index >= len(self.inconsistencies):
-            new_index = len(self.inconsistencies) - 1
-
-        self._navigate_to_inconsistency(new_index)
-
-    def _on_prev_related(self):
-        """Navigate to previous related match within current inconsistency."""
-        if not self.inconsistencies:
-            return
-
-        match, reason, related_matches = self.inconsistencies[self.current_inconsistency_index]
-        debug_log(f"_on_prev_related: {len(related_matches)} related matches, current_related_index={self.current_related_index}")
-        for i, rm in enumerate(related_matches):
-            debug_log(f"  related[{i}]: {rm.id}, bank={rm.bank_transaction.id}")
-        if self.current_related_index > 0:
-            self.current_related_index -= 1
-            target_match = related_matches[self.current_related_index]
-            debug_log(f"Navigating to related[{self.current_related_index}]: {target_match.id}")
-            self._navigate_to_related_match(target_match)
-
-    def _on_next_related(self):
-        """Navigate to next related match within current inconsistency."""
-        if not self.inconsistencies:
-            return
-
-        match, reason, related_matches = self.inconsistencies[self.current_inconsistency_index]
-        debug_log(f"_on_next_related: {len(related_matches)} related matches, current_related_index={self.current_related_index}")
-        for i, rm in enumerate(related_matches):
-            debug_log(f"  related[{i}]: {rm.id}, bank={rm.bank_transaction.id}")
-        if self.current_related_index < len(related_matches) - 1:
-            self.current_related_index += 1
-            target_match = related_matches[self.current_related_index]
-            debug_log(f"Navigating to related[{self.current_related_index}]: {target_match.id}")
-            self._navigate_to_related_match(target_match)
-
-    def _navigate_to_related_match(self, match):
-        """Navigate to a specific related match."""
-        debug_log(f"_navigate_to_related_match: looking for {match.id}, bank={match.bank_transaction.id}")
-
-        # Ensure we're showing all transactions
-        if not self.show_all_var.get():
-            self.show_all_var.set(True)
-            self._on_show_all_changed()
-
-        # Find the match index in suggestions
-        match_index = self.system.find_match_in_suggestions(match)
-        debug_log(f"find_match_in_suggestions returned index={match_index}")
-        if match_index >= 0:
-            self.current_index = match_index
-            actual_match = self.suggestions[self.current_index]
-            debug_log(f"Moved to index {match_index}, actual match is {actual_match.id}, bank={actual_match.bank_transaction.id}")
-            self._update_display()
-        else:
-            debug_log(f"WARNING: Match {match.id} not found in suggestions!")
-
-        self._update_inconsistency_ui()
-
-    def _get_current_bank_transaction(self):
-        """Get the current bank transaction (from match or direct lookup)."""
-        if self.suggestions and self.current_index < len(self.suggestions):
-            return self.suggestions[self.current_index].bank_transaction
-        return None
-
-    def _on_create_manual_match(self):
-        """Create a manual match from trans_no(s) entered by the user."""
-        bank_txn = self._get_current_bank_transaction()
-        if not bank_txn:
-            messagebox.showerror("Error", "No bank transaction selected")
-            return
-
-        # Check if this bank transaction is already matched
-        if self.suggestions and self.current_index < len(self.suggestions):
-            match = self.suggestions[self.current_index]
-            if match.status in (MatchStatus.CONFIRMED, MatchStatus.MANUAL_MATCH,
-                               MatchStatus.MANUALLY_RESOLVED):
-                messagebox.showerror("Error",
-                    f"This bank transaction is already {match.status.value}.\n"
-                    "Use Reject first if you want to change it.")
-                return
-
-        # Get trans_nos from entry
-        trans_no_text = self.trans_no_entry.get().strip()
-        if not trans_no_text:
-            messagebox.showerror("Error", "Please enter one or more trans_no values (comma-separated)")
-            return
-
-        # Parse trans_nos
-        trans_nos = [t.strip() for t in trans_no_text.split(',') if t.strip()]
-        if not trans_nos:
-            messagebox.showerror("Error", "Please enter valid trans_no values")
-            return
-
-        # Create the manual match
-        success, message, match = self.system.create_manual_match(bank_txn, trans_nos)
+        trans_nos = [t.strip() for t in text.split(',') if t.strip()]
+        success, message = self.system.reconcile_manual(bank, trans_nos)
 
         if success:
-            messagebox.showinfo("Success", message)
-            # Clear the entry
             self.trans_no_entry.delete(0, tk.END)
-            # Update the current match in suggestions if it exists
-            if self.suggestions and self.current_index < len(self.suggestions):
-                self.suggestions[self.current_index] = match
-            # Refresh display
+            self._rebuild_bank_list()
+            self._refresh_candidates()
             self._update_display()
         else:
-            messagebox.showerror("Error", message)
+            messagebox.showerror("Manual Match Failed", message)
 
     def _on_mark_resolved(self):
-        """Mark the current bank transaction as manually resolved."""
-        bank_txn = self._get_current_bank_transaction()
-        if not bank_txn:
-            messagebox.showerror("Error", "No bank transaction selected")
+        """Mark current bank entry as manually resolved."""
+        bank = self._current_bank()
+        if not bank:
+            messagebox.showerror("Error", "No bank entry selected")
             return
 
-        # Check if this bank transaction is already matched
-        if self.suggestions and self.current_index < len(self.suggestions):
-            match = self.suggestions[self.current_index]
-            if match.status in (MatchStatus.CONFIRMED, MatchStatus.MANUAL_MATCH,
-                               MatchStatus.MANUALLY_RESOLVED):
-                messagebox.showerror("Error",
-                    f"This bank transaction is already {match.status.value}.\n"
-                    "Use Reject first if you want to change it.")
-                return
+        if self.system.is_bank_reconciled(bank.id):
+            messagebox.showerror("Error", "Bank entry is already reconciled.\n"
+                                 "Un-reconcile first if you want to change it.")
+            return
 
-        # Get comment from entry
-        comment = self.resolved_comment_entry.get().strip()
+        comment = self.resolved_entry.get().strip()
         if not comment:
-            messagebox.showerror("Error", "Please enter a comment explaining how this was resolved")
+            messagebox.showerror("Error", "Please enter a comment explaining the resolution")
             return
 
-        # Create the manually resolved entry
-        success, message, match = self.system.create_manually_resolved(bank_txn, comment)
+        success, message = self.system.mark_resolved(bank, comment)
 
         if success:
-            messagebox.showinfo("Success", message)
-            # Clear the entry
-            self.resolved_comment_entry.delete(0, tk.END)
-            # Update the current match in suggestions if it exists
-            if self.suggestions and self.current_index < len(self.suggestions):
-                self.suggestions[self.current_index] = match
-            # Refresh display
+            self.resolved_entry.delete(0, tk.END)
+            self._rebuild_bank_list()
+            self._refresh_candidates()
             self._update_display()
         else:
-            messagebox.showerror("Error", message)
+            messagebox.showerror("Mark Resolved Failed", message)
 
-    def _on_export_csvs(self):
-        """Export matched and unmatched CSVs."""
-        import os
+    def _on_config_changed(self):
+        """Handle date tolerance or trans_no limit change."""
+        self.system.date_tolerance_days = self.date_tol_var.get()
+        self.system.trans_no_limit = self.trans_limit_var.get()
+        self._refresh_candidates()
+        self._update_display()
 
-        # Get base directory for saving
-        base_dir = self.system.base_dir
+    # -------------------------------------------------------------------
+    # Bank search
+    # -------------------------------------------------------------------
 
-        # Export matched CSV
-        matched_path = os.path.join(base_dir, "matched_transactions.csv")
-        matched_count = self.system.export_matched_csv(matched_path)
+    def _on_bank_search(self, event=None):
+        """Search bank entries."""
+        term = self.bank_search_entry.get().strip()
+        if not term:
+            return
 
-        # Export unmatched beacon CSV
-        unmatched_beacon_path = os.path.join(base_dir, "unmatched_beacons.csv")
-        unmatched_beacon_count = self.system.export_unmatched_beacon_csv(unmatched_beacon_path)
+        indices = self.system.search_bank_entries(term)
+        if not indices:
+            self.bank_search_result.config(text="No matches", foreground='#CC0000')
+            self.bank_search_matches = []
+            return
 
-        # Export unmatched bank CSV
-        unmatched_bank_path = os.path.join(base_dir, "unmatched_bank.csv")
-        unmatched_bank_count = self.system.export_unmatched_bank_csv(unmatched_bank_path)
+        # Map system indices to bank_list indices
+        bank_id_to_list_idx = {b.id: i for i, b in enumerate(self.bank_list)}
+        self.bank_search_matches = []
+        for sys_idx in indices:
+            bank_id = self.system.bank_transactions[sys_idx].id
+            if bank_id in bank_id_to_list_idx:
+                self.bank_search_matches.append(bank_id_to_list_idx[bank_id])
 
-        messagebox.showinfo("Export Complete",
-            f"Exported:\n\n"
-            f"1. Matched transactions: {matched_count} rows\n"
-            f"   → {matched_path}\n\n"
-            f"2. Unmatched beacons: {unmatched_beacon_count} rows\n"
-            f"   → {unmatched_beacon_path}\n\n"
-            f"3. Unmatched bank: {unmatched_bank_count} rows\n"
-            f"   → {unmatched_bank_path}")
+        if not self.bank_search_matches:
+            # Results exist but not in current view - suggest showing all
+            self.bank_search_result.config(
+                text=f"{len(indices)} found (try Show All)", foreground='#CC8800'
+            )
+            return
 
+        self.bank_search_index = 0
+        self.bank_index = self.bank_search_matches[0]
+        self._refresh_candidates()
+        self._update_display()
+        self.bank_search_result.config(
+            text=f"1 / {len(self.bank_search_matches)}", foreground='gray'
+        )
+
+    def _on_bank_search_next(self):
+        """Go to next bank search result."""
+        if not self.bank_search_matches:
+            return
+        self.bank_search_index = (self.bank_search_index + 1) % len(self.bank_search_matches)
+        self.bank_index = self.bank_search_matches[self.bank_search_index]
+        self._refresh_candidates()
+        self._update_display()
+        self.bank_search_result.config(
+            text=f"{self.bank_search_index + 1} / {len(self.bank_search_matches)}"
+        )
+
+    def _on_bank_search_clear(self):
+        """Clear bank search."""
+        self.bank_search_entry.delete(0, tk.END)
+        self.bank_search_matches = []
+        self.bank_search_index = 0
+        self.bank_search_result.config(text="")
+
+    # -------------------------------------------------------------------
+    # Beacon search
+    # -------------------------------------------------------------------
+
+    def _on_beacon_search(self, event=None):
+        """Search beacon entries (right panel)."""
+        term = self.beacon_search_entry.get().strip()
+        if not term:
+            return
+
+        bypass = self.beacon_bypass_var.get()
+        results = self.system.search_beacon_entries(term, available_only=not bypass)
+
+        if not results:
+            self.beacon_search_result.config(text="No matches", foreground='#CC0000')
+            self.beacon_search_results = []
+            self.beacon_search_active = False
+            return
+
+        self.beacon_search_results = results
+        self.beacon_search_active = True
+        self.candidate_index = 0
+        self._update_beacon_panel()
+        self._update_action_states()
+        self.beacon_search_result.config(
+            text=f"Found {len(results)}", foreground='gray'
+        )
+
+    def _on_beacon_search_clear(self):
+        """Clear beacon search and return to candidates view."""
+        self.beacon_search_entry.delete(0, tk.END)
+        self.beacon_search_results = []
+        self.beacon_search_active = False
+        self.beacon_search_result.config(text="")
+        self._refresh_candidates()
+        self._update_display()
+
+    # -------------------------------------------------------------------
+    # Reports
+    # -------------------------------------------------------------------
+
+    def _on_reports(self):
+        """Generate all reports."""
+        data_dir = self.system.data_dir
+
+        reconciled_path = os.path.join(data_dir, "report_reconciled.csv")
+        unreconciled_bank_path = os.path.join(data_dir, "report_unreconciled_bank.csv")
+        unreconciled_beacon_path = os.path.join(data_dir, "report_unreconciled_beacon.csv")
+        resolved_path = os.path.join(data_dir, "report_resolved.csv")
+        stats_path = os.path.join(data_dir, "report_stats.txt")
+
+        r1 = self.system.export_reconciled_csv(reconciled_path)
+        r2 = self.system.export_unreconciled_bank_csv(unreconciled_bank_path)
+        r3 = self.system.export_unreconciled_beacon_csv(unreconciled_beacon_path)
+        r4 = self.system.export_resolved_csv(resolved_path)
+        self.system.export_stats_summary(stats_path)
+
+        messagebox.showinfo(
+            "Reports Generated",
+            f"Reports saved to:\n{data_dir}\n\n"
+            f"1. Reconciled: {r1} rows\n"
+            f"2. Un-reconciled bank: {r2} rows\n"
+            f"3. Un-reconciled beacon: {r3} rows\n"
+            f"4. Manually resolved: {r4} rows\n"
+            f"5. Stats summary\n\n"
+            f"Version: {VERSION}"
+        )
+
+
+# -------------------------------------------------------------------
+# Entry point
+# -------------------------------------------------------------------
 
 def main():
     """Main entry point for GUI application."""
+    data_dir = None
+    if len(sys.argv) > 1:
+        data_dir = os.path.abspath(sys.argv[1])
+
     root = tk.Tk()
 
-    # Set icon if available
     try:
         root.iconbitmap('icon.ico')
     except tk.TclError:
         pass
 
-    app = ReconciliationGUI(root)
+    app = ReconciliationGUI(root, data_dir=data_dir)
 
-    # Save on window close
     def on_closing():
-        app._auto_save()
+        app.system.save_state()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_closing)

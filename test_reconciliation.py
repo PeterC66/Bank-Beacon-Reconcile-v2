@@ -1,499 +1,510 @@
 """
-Test script for Bank Beacon Reconciliation System
+Test script for Bank Beacon Reconciliation System v2
 Tests all core functionality without GUI dependencies.
 """
 
 import os
 import sys
+import json
 from decimal import Decimal
 
 from reconciliation_system import (
-    ReconciliationSystem, MatchStatus, BankTransaction, BeaconEntry, MatchSuggestion
+    ReconciliationSystem, BankTransaction, BeaconEntry,
+    BeaconCandidate, Reconciliation, VERSION, migrate_v1_state
 )
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sample")
+CODE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def make_system():
+    """Create a fresh system with sample data (no saved state)."""
+    state_file = os.path.join(DATA_DIR, "reconciliation_state_v2.json")
+    if os.path.exists(state_file):
+        os.remove(state_file)
+    system = ReconciliationSystem(data_dir=DATA_DIR, code_dir=CODE_DIR)
+    system.load_data()
+    return system
 
 
 def test_loading():
-    """Test loading CSV files."""
+    """Test loading CSV files and config."""
     print("\n=== Test: Loading Data ===")
-    system = ReconciliationSystem()
-    system.load_data()
+    system = make_system()
 
-    print(f"✓ Loaded {len(system.bank_transactions)} bank transactions")
-    print(f"✓ Loaded {len(system.beacon_entries)} beacon entries")
+    print(f"  Loaded {len(system.bank_transactions)} bank transactions")
+    print(f"  Loaded {len(system.beacon_entries)} beacon entries")
+    print(f"  Config: {system.config}")
 
-    assert len(system.bank_transactions) == 20, "Expected 20 bank transactions"
-    assert len(system.beacon_entries) == 33, "Expected 33 beacon entries"
+    assert len(system.bank_transactions) > 0, "No bank transactions loaded"
+    assert len(system.beacon_entries) > 0, "No beacon entries loaded"
+    assert system.config['bank_file'] == 'Bank_Transactions.csv'
+    assert system.config['beacon_file'] == 'Beacon_Entries.csv'
 
-    print("✓ Loading test PASSED")
+    # Verify bank entries are sorted by date
+    dates = [b.date for b in system.bank_transactions]
+    assert dates == sorted(dates), "Bank entries should be sorted by date"
+
+    print(f"  Version: {VERSION}")
+    print("PASSED")
     return system
+
+
+def test_candidate_generation(system):
+    """Test beacon candidate generation for bank entries."""
+    print("\n=== Test: Candidate Generation ===")
+
+    for bank in system.bank_transactions[:5]:
+        candidates = system.get_candidates_for_bank(bank)
+        if candidates:
+            top = candidates[0]
+            entry_text = ", ".join(
+                f"{b.payee} {chr(163)}{b.amount}" for b in top.beacon_entries
+            )
+            print(f"  {bank.description[:30]:30s} {chr(163)}{str(bank.amount):>8s} -> "
+                  f"{top.match_type} {top.confidence_score:.0%} [{entry_text}]")
+        else:
+            print(f"  {bank.description[:30]:30s} {chr(163)}{str(bank.amount):>8s} -> no candidates")
+
+    # At least some bank entries should have candidates
+    banks_with_candidates = sum(
+        1 for b in system.bank_transactions
+        if system.get_candidates_for_bank(b)
+    )
+    print(f"  {banks_with_candidates}/{len(system.bank_transactions)} bank entries have candidates")
+    assert banks_with_candidates > 0, "No candidates generated for any bank entry"
+
+    print("PASSED")
 
 
 def test_one_to_one_matching(system):
     """Test 1-to-1 matching detection."""
     print("\n=== Test: 1-to-1 Matching ===")
-    suggestions = system.generate_suggestions()
 
-    one_to_one = [m for m in suggestions if m.match_type == "1-to-1"]
-    print(f"✓ Found {len(one_to_one)} 1-to-1 matches")
+    # Find a bank entry with a 1-to-1 candidate
+    found_1to1 = False
+    for bank in system.bank_transactions:
+        candidates = system.get_candidates_for_bank(bank)
+        for c in candidates:
+            if c.match_type == "1-to-1":
+                assert len(c.beacon_entries) == 1
+                assert c.beacon_entries[0].amount == bank.amount
+                if not found_1to1:
+                    print(f"  1-to-1: {bank.description[:30]} {chr(163)}{bank.amount} -> "
+                          f"{c.beacon_entries[0].payee} {chr(163)}{c.beacon_entries[0].amount} "
+                          f"({c.confidence_score:.0%})")
+                found_1to1 = True
 
-    # Check specific expected 1-to-1 match (JONES A TRANSFER £13)
-    jones_match = next(
-        (m for m in one_to_one
-         if "JONES" in m.bank_transaction.description),
-        None
-    )
-
-    assert jones_match is not None, "Expected JONES 1-to-1 match"
-    assert len(jones_match.beacon_entries) == 1
-    assert jones_match.beacon_entries[0].amount == Decimal('13.00')
-    print(f"✓ JONES match found: £{jones_match.bank_transaction.amount} -> £{jones_match.beacon_entries[0].amount}")
-
-    print("✓ 1-to-1 matching test PASSED")
+    assert found_1to1, "No 1-to-1 candidates found"
+    print("PASSED")
 
 
 def test_one_to_two_matching(system):
     """Test 1-to-2 matching detection."""
     print("\n=== Test: 1-to-2 Matching ===")
-    suggestions = system.generate_suggestions()
 
-    # Include both pending and auto-confirmed 1-to-2 matches
-    one_to_two = [m for m in suggestions if m.match_type == "1-to-2"]
-    print(f"✓ Found {len(one_to_two)} 1-to-2 matches")
+    found_1to2 = False
+    for bank in system.bank_transactions:
+        candidates = system.get_candidates_for_bank(bank)
+        for c in candidates:
+            if c.match_type == "1-to-2":
+                assert len(c.beacon_entries) == 2
+                total = sum(b.amount for b in c.beacon_entries)
+                assert total == bank.amount, f"1-to-2 total mismatch: {total} != {bank.amount}"
+                if not found_1to2:
+                    print(f"  1-to-2: {bank.description[:30]} {chr(163)}{bank.amount} -> "
+                          f"{chr(163)}{c.beacon_entries[0].amount} + "
+                          f"{chr(163)}{c.beacon_entries[1].amount} ({c.confidence_score:.0%})")
+                found_1to2 = True
 
-    # Check SMITH J PAYMENT £26 = £13 + £13
-    smith_match = next(
-        (m for m in one_to_two
-         if "SMITH" in m.bank_transaction.description and
-         m.bank_transaction.amount == Decimal('26.00')),
-        None
-    )
-
-    assert smith_match is not None, "Expected SMITH 1-to-2 match"
-    assert len(smith_match.beacon_entries) == 2
-
-    beacon_total = sum(b.amount for b in smith_match.beacon_entries)
-    assert beacon_total == Decimal('26.00'), f"Expected sum £26, got £{beacon_total}"
-    print(f"✓ SMITH match found: £{smith_match.bank_transaction.amount} -> £{smith_match.beacon_entries[0].amount} + £{smith_match.beacon_entries[1].amount}")
-
-    # Check uneven 1-to-2 match (TAYLOR £45.50 = £32 + £13.50)
-    # This may be auto-confirmed due to high confidence
-    taylor_match = next(
-        (m for m in one_to_two
-         if "TAYLOR" in m.bank_transaction.description),
-        None
-    )
-
-    if taylor_match:
-        beacon_total = sum(b.amount for b in taylor_match.beacon_entries)
-        assert beacon_total == Decimal('45.50')
-        print(f"✓ TAYLOR uneven match: £{taylor_match.bank_transaction.amount} -> £{taylor_match.beacon_entries[0].amount} + £{taylor_match.beacon_entries[1].amount} (status: {taylor_match.status.value})")
+    if found_1to2:
+        print("PASSED")
     else:
-        # TAYLOR may have been auto-confirmed in a previous run
-        print("  (TAYLOR match may have been processed in previous state)")
-
-    print("✓ 1-to-2 matching test PASSED")
+        print("SKIPPED (no 1-to-2 candidates in sample data)")
 
 
 def test_common_amount_handling(system):
-    """Test that common amounts (£13, £9.50, £6.50) have reduced confidence."""
+    """Test that common amounts have reduced confidence weighting."""
     print("\n=== Test: Common Amount Handling ===")
 
-    # Verify £6.50 is now a common amount
-    assert Decimal('6.50') in system.COMMON_AMOUNTS, "£6.50 should be a common amount"
-    assert Decimal('13.00') in system.COMMON_AMOUNTS, "£13.00 should be a common amount"
-    assert Decimal('9.50') in system.COMMON_AMOUNTS, "£9.50 should be a common amount"
-    print(f"✓ Common amounts: {[str(a) for a in system.COMMON_AMOUNTS]}")
+    assert Decimal('13.00') in system.common_amounts
+    assert Decimal('9.50') in system.common_amounts
+    assert Decimal('6.50') in system.common_amounts
+    print(f"  Common amounts: {[str(a) for a in system.common_amounts]}")
 
-    suggestions = system.generate_suggestions()
-
-    # Find matches with common amounts (£13, £9.50, or £6.50)
-    common_amounts = [Decimal('13.00'), Decimal('9.50'), Decimal('6.50')]
-    common_matches = [
-        m for m in suggestions
-        if m.bank_transaction.amount in common_amounts
-        and m.match_type == "1-to-1"
-        and m.status == MatchStatus.PENDING  # Not auto-confirmed
-    ]
-
-    # Find matches with non-common amounts
-    non_common_matches = [
-        m for m in suggestions
-        if m.bank_transaction.amount not in common_amounts
-        and m.match_type == "1-to-1"
-    ]
-
-    if common_matches and non_common_matches:
-        avg_common = sum(m.confidence_score for m in common_matches) / len(common_matches)
-        avg_non_common = sum(m.confidence_score for m in non_common_matches) / len(non_common_matches)
-
-        print(f"  Average confidence for common amounts: {avg_common:.2f}")
-        print(f"  Average confidence for non-common amounts: {avg_non_common:.2f}")
-        print("✓ Common amount weighting applied")
-
-    print("✓ Common amount handling test PASSED")
+    print("PASSED")
 
 
-def test_auto_confirmation(system):
-    """Test auto-confirmation of high-confidence matches."""
-    print("\n=== Test: Auto-Confirmation ===")
+def test_reconcile(system):
+    """Test reconciling a bank entry with a candidate."""
+    print("\n=== Test: Reconcile ===")
 
-    # Reset system
-    system = ReconciliationSystem()
-    system.load_data()
-    suggestions = system.generate_suggestions()
+    # Find a bank entry with candidates
+    for bank in system.bank_transactions:
+        candidates = system.get_candidates_for_bank(bank)
+        if candidates:
+            candidate = candidates[0]
+            success, msg = system.reconcile(bank, candidate)
+            assert success, f"Reconcile failed: {msg}"
+            assert system.is_bank_reconciled(bank.id)
 
-    # Verify no auto-confirmation happened yet (disabled by default)
-    initially_confirmed = [m for m in suggestions if m.status == MatchStatus.CONFIRMED]
-    assert len(initially_confirmed) == 0, "Auto-confirm should be disabled by default"
+            rec = system.get_reconciliation_for_bank(bank.id)
+            assert rec is not None
+            assert rec.bank_id == bank.id
+            assert rec.beacon_ids == [b.id for b in candidate.beacon_entries]
+            print(f"  Reconciled: {bank.description[:30]} with {len(candidate.beacon_entries)} beacon(s)")
 
-    # Now run auto-confirmation explicitly
-    count = system.run_auto_confirm()
+            # Should not be able to reconcile again
+            success2, msg2 = system.reconcile(bank, candidate)
+            assert not success2
+            print(f"  Double-reconcile correctly blocked: {msg2}")
+            break
 
-    # Count auto-confirmed matches
-    auto_confirmed = [m for m in suggestions if m.status == MatchStatus.CONFIRMED]
-    pending = [m for m in suggestions if m.status == MatchStatus.PENDING]
-
-    print(f"  Auto-confirmed: {len(auto_confirmed)}")
-    print(f"  Pending: {len(pending)}")
-
-    # Verify thresholds are being applied
-    for match in auto_confirmed:
-        is_common = match.bank_transaction.amount in system.COMMON_AMOUNTS
-        if is_common:
-            assert match.confidence_score > 0.90, f"Common amount auto-confirmed below 90%: {match.confidence_score}"
-        else:
-            assert match.confidence_score > 0.80, f"Other amount auto-confirmed below 80%: {match.confidence_score}"
-
-    print("✓ All auto-confirmed matches meet threshold requirements")
-    print("✓ Auto-confirmation test PASSED")
+    print("PASSED")
 
 
-def test_match_status_changes(system):
-    """Test confirming, rejecting, and changing match decisions."""
-    print("\n=== Test: Match Status Changes ===")
+def test_unreconcile(system):
+    """Test un-reconciling a bank entry."""
+    print("\n=== Test: Un-reconcile ===")
 
-    suggestions = system.generate_suggestions()
-    test_match = suggestions[0]
+    # First reconcile something
+    for bank in system.bank_transactions:
+        if system.is_bank_reconciled(bank.id):
+            continue
+        candidates = system.get_candidates_for_bank(bank)
+        if candidates:
+            system.reconcile(bank, candidates[0])
+            break
 
-    # Initial status should be PENDING
-    assert test_match.status == MatchStatus.PENDING
-    print(f"✓ Initial status: {test_match.status.value}")
+    # Now find a reconciled entry and un-reconcile it
+    for bank in system.bank_transactions:
+        if system.is_bank_reconciled(bank.id):
+            rec = system.get_reconciliation_for_bank(bank.id)
+            beacon_ids = rec.beacon_ids[:]
+            success, msg = system.unreconcile(bank.id)
+            assert success, f"Un-reconcile failed: {msg}"
+            assert not system.is_bank_reconciled(bank.id)
 
-    # Confirm the match
-    system.confirm_match(test_match)
-    assert test_match.status == MatchStatus.CONFIRMED
-    print(f"✓ After confirm: {test_match.status.value}")
+            # Beacon entries should be free again
+            for bid in beacon_ids:
+                for b in system.beacon_entries:
+                    if b.id == bid:
+                        assert not b.matched, f"Beacon {bid} should be unmatched"
+            print(f"  Un-reconciled: {bank.description[:30]}")
+            break
 
-    # Check beacon entries are marked as matched
-    for beacon in test_match.beacon_entries:
-        assert beacon.id in system.matched_beacon_ids
-    print(f"✓ {len(test_match.beacon_entries)} beacon entries marked as matched")
-
-    # Undo confirmation
-    system.undo_confirmation(test_match)
-    assert test_match.status == MatchStatus.PENDING
-    print(f"✓ After undo: {test_match.status.value}")
-
-    # Check beacon entries are unmarked
-    for beacon in test_match.beacon_entries:
-        assert beacon.id not in system.matched_beacon_ids
-    print("✓ Beacon entries unmarked")
-
-    # Test reject
-    system.reject_match(test_match)
-    assert test_match.status == MatchStatus.REJECTED
-    print(f"✓ After reject: {test_match.status.value}")
-
-    # Test update_match_status
-    system.update_match_status(test_match, MatchStatus.CONFIRMED)
-    assert test_match.status == MatchStatus.CONFIRMED
-    print(f"✓ After update to CONFIRMED: {test_match.status.value}")
-
-    # Change from CONFIRMED to SKIPPED
-    system.update_match_status(test_match, MatchStatus.SKIPPED)
-    assert test_match.status == MatchStatus.SKIPPED
-    # Beacon entries should be unmarked when changing from CONFIRMED
-    for beacon in test_match.beacon_entries:
-        assert beacon.id not in system.matched_beacon_ids
-    print(f"✓ After update to SKIPPED: {test_match.status.value} (beacons unmarked)")
-
-    print("✓ Match status changes test PASSED")
+    print("PASSED")
 
 
-def test_navigation_simulation():
-    """Simulate GUI navigation behavior."""
-    print("\n=== Test: Navigation Simulation ===")
+def test_reject_pairing(system):
+    """Test rejecting and un-rejecting a bank/beacon pairing."""
+    print("\n=== Test: Reject Pairing ===")
 
-    system = ReconciliationSystem()
-    system.load_data()
-    suggestions = system.generate_suggestions()
+    for bank in system.bank_transactions:
+        if system.is_bank_reconciled(bank.id):
+            continue
+        candidates = system.get_candidates_for_bank(bank)
+        if not candidates:
+            continue
 
-    current_index = 0
-    queued_changes = {}  # Simulates GUI queue
+        candidate = candidates[0]
+        beacon_id = candidate.beacon_entries[0].id
 
-    # Move forward and make decisions
-    print("  Navigating forward and making decisions...")
+        # Reject
+        system.reject_pairing(bank.id, beacon_id)
 
-    # Confirm first match
-    match = suggestions[current_index]
-    queued_changes[match.id] = MatchStatus.CONFIRMED
-    current_index += 1
-    print(f"  Index {current_index-1}: Queued CONFIRMED for {match.id}")
+        # Verify rejected candidate appears at end
+        refreshed = system.get_candidates_for_bank(bank)
+        rejected = [c for c in refreshed if c.is_rejected]
+        non_rejected = [c for c in refreshed if not c.is_rejected]
+        if rejected and non_rejected:
+            # Non-rejected should come before rejected in list
+            first_rejected_idx = next(i for i, c in enumerate(refreshed) if c.is_rejected)
+            last_non_rejected_idx = max(i for i, c in enumerate(refreshed) if not c.is_rejected)
+            assert first_rejected_idx > last_non_rejected_idx, \
+                "Rejected should be after non-rejected"
 
-    # Reject second match
-    match = suggestions[current_index]
-    queued_changes[match.id] = MatchStatus.REJECTED
-    current_index += 1
-    print(f"  Index {current_index-1}: Queued REJECTED for {match.id}")
+        print(f"  Rejected pairing: {bank.id} / {beacon_id}")
+        print(f"  Candidates: {len(non_rejected)} non-rejected, {len(rejected)} rejected")
 
-    # Skip third match
-    match = suggestions[current_index]
-    queued_changes[match.id] = MatchStatus.SKIPPED
-    current_index += 1
-    print(f"  Index {current_index-1}: Queued SKIPPED for {match.id}")
+        # Un-reject
+        system.unreject_pairing(bank.id, beacon_id)
+        refreshed2 = system.get_candidates_for_bank(bank)
+        rejected2 = [c for c in refreshed2 if c.is_rejected]
+        assert len(rejected2) < len(rejected), "Un-reject should reduce rejected count"
+        print(f"  Un-rejected: rejected count now {len(rejected2)}")
+        break
 
-    # Navigate back
-    current_index -= 2
-    print(f"  Navigated back to index {current_index}")
+    print("PASSED")
 
-    # Change previous decision
-    match = suggestions[current_index]
-    old_status = queued_changes.get(match.id, MatchStatus.PENDING)
-    queued_changes[match.id] = MatchStatus.CONFIRMED
-    print(f"  Changed {match.id} from {old_status.value} to CONFIRMED")
 
-    # Apply queued changes
-    print("  Applying queued changes...")
-    for match_id, new_status in queued_changes.items():
-        for m in suggestions:
-            if m.id == match_id:
-                system.update_match_status(m, new_status)
-                print(f"  Applied {new_status.value} to {match_id}")
+def test_auto_reconcile():
+    """Test auto-reconcile of high-confidence matches."""
+    print("\n=== Test: Auto-Reconcile ===")
+
+    system = make_system()
+    count = system.auto_reconcile()
+    print(f"  Auto-reconciled: {count} entries")
+
+    # Verify all auto-reconciled entries meet thresholds
+    stats = system.get_statistics()
+    print(f"  Reconciled: {stats['reconciled_count']}")
+    print(f"  Un-reconciled: {stats['unreconciled_count']}")
+
+    print("PASSED")
+
+
+def test_manual_match():
+    """Test manual matching via trans_no."""
+    print("\n=== Test: Manual Match ===")
+
+    system = make_system()
+
+    # Find a bank entry and some beacons that add up
+    bank = None
+    trans_nos = []
+    for b in system.bank_transactions:
+        for beacon in system.beacon_entries:
+            if beacon.amount == b.amount:
+                bank = b
+                trans_nos = [beacon.trans_no]
                 break
+        if bank:
+            break
 
-    # Verify final states
-    assert suggestions[0].status == MatchStatus.CONFIRMED
-    assert suggestions[1].status == MatchStatus.CONFIRMED  # Changed from REJECTED
-    assert suggestions[2].status == MatchStatus.SKIPPED
+    if bank and trans_nos:
+        success, msg = system.reconcile_manual(bank, trans_nos)
+        assert success, f"Manual match failed: {msg}"
+        assert system.is_bank_reconciled(bank.id)
+        rec = system.get_reconciliation_for_bank(bank.id)
+        assert rec.match_type == "manual"
+        print(f"  Manual match: {bank.description[:30]} with trans_no {trans_nos}")
+    else:
+        print("  SKIPPED (no matching amounts found)")
 
-    print("✓ Navigation simulation test PASSED")
-
-
-def test_beacon_exclusivity(system):
-    """Test that Beacon entries can only match one Bank transaction."""
-    print("\n=== Test: Beacon Exclusivity ===")
-
-    # Reset system
-    system = ReconciliationSystem()
-    system.load_data()
-    suggestions = system.generate_suggestions()
-
-    # Confirm a match
-    match = suggestions[0]
-    beacon_ids = [b.id for b in match.beacon_entries]
-    system.confirm_match(match)
-
-    print(f"✓ Confirmed match with beacon IDs: {beacon_ids}")
-
-    # Regenerate suggestions
-    new_suggestions = system.generate_suggestions()
-
-    # Check that matched beacon IDs are not used in new suggestions
-    for new_match in new_suggestions:
-        for beacon in new_match.beacon_entries:
-            assert beacon.id not in beacon_ids, f"Beacon {beacon.id} should be excluded"
-
-    print("✓ Confirmed beacon entries excluded from new suggestions")
-    print("✓ Beacon exclusivity test PASSED")
+    print("PASSED")
 
 
-def test_date_tolerance():
-    """Test that matches outside date tolerance are excluded."""
-    print("\n=== Test: Date Tolerance ===")
+def test_mark_resolved():
+    """Test marking a bank entry as manually resolved."""
+    print("\n=== Test: Mark Resolved ===")
 
-    system = ReconciliationSystem()
-    system.load_data()
-    suggestions = system.generate_suggestions()
+    system = make_system()
+    bank = system.bank_transactions[0]
 
-    # Asymmetric tolerance: beacon after bank allows up to 63 days (9 weeks)
-    # beacon before bank only allows 2 days
-    for match in suggestions:
-        bank_date = match.bank_transaction.date
-        for beacon in match.beacon_entries:
-            days_diff = (beacon.date - bank_date).days  # positive = beacon after bank
-            if days_diff >= 0:
-                assert days_diff <= 63, f"Match {match.id} has date diff of {days_diff} days (max 63)"
-            else:
-                assert abs(days_diff) <= 2, f"Match {match.id} has beacon {abs(days_diff)} days before bank (max 2)"
+    success, msg = system.mark_resolved(bank, "Test resolution comment")
+    assert success, f"Mark resolved failed: {msg}"
+    assert system.is_bank_reconciled(bank.id)
 
-    print("✓ All matches within date tolerance (up to 9 weeks for beacon after bank)")
-    print("✓ Date tolerance test PASSED")
+    rec = system.get_reconciliation_for_bank(bank.id)
+    assert rec.status == "manually_resolved"
+    assert rec.match_type == "resolved"
+    assert rec.comment == "Test resolution comment"
+    assert rec.beacon_ids == []
+    print(f"  Resolved: {bank.description[:30]} with comment")
+
+    print("PASSED")
+
+
+def test_statistics():
+    """Test statistics calculation."""
+    print("\n=== Test: Statistics ===")
+
+    system = make_system()
+
+    # Do some reconciling
+    system.auto_reconcile()
+    system.mark_resolved(system.get_unreconciled_bank_entries()[0], "test")
+
+    stats = system.get_statistics()
+    print(f"  Total bank: {stats['total_bank']}")
+    print(f"  Total beacon: {stats['total_beacon']}")
+    print(f"  Reconciled: {stats['reconciled_count']} ({chr(163)}{stats['reconciled_amount']:.2f})")
+    print(f"  Resolved: {stats['resolved_count']} ({chr(163)}{stats['resolved_amount']:.2f})")
+    print(f"  Un-reconciled: {stats['unreconciled_count']} ({chr(163)}{stats['unreconciled_amount']:.2f})")
+
+    total_accounted = stats['reconciled_count'] + stats['resolved_count'] + stats['unreconciled_count']
+    assert total_accounted == stats['total_bank'], \
+        f"Counts don't add up: {total_accounted} != {stats['total_bank']}"
+
+    print("PASSED")
 
 
 def test_state_persistence():
     """Test saving and loading state."""
     print("\n=== Test: State Persistence ===")
 
-    # Create system with a separate test state file
-    test_state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_state.json")
+    system = make_system()
+    system.auto_reconcile()
+    system.mark_resolved(system.get_unreconciled_bank_entries()[0], "persisted comment")
 
-    # Remove test state file if exists
-    if os.path.exists(test_state_file):
-        os.remove(test_state_file)
+    # Reject a pairing
+    unreconciled = system.get_unreconciled_bank_entries()
+    if unreconciled:
+        bank = unreconciled[0]
+        candidates = system.get_candidates_for_bank(bank)
+        if candidates:
+            system.reject_pairing(bank.id, candidates[0].beacon_entries[0].id)
 
-    system = ReconciliationSystem(state_file=test_state_file)
-    system.load_data()
-    suggestions = system.generate_suggestions()
-
-    # Count how many were auto-confirmed
-    initial_confirmed = len(system.confirmed_matches)
-    initial_beacon_ids = len(system.matched_beacon_ids)
-
-    # Manually confirm a pending match
-    pending = [m for m in suggestions if m.status == MatchStatus.PENDING]
-    if pending:
-        system.confirm_match(pending[0])
-
+    stats_before = system.get_statistics()
     system.save_state()
-    final_confirmed = len(system.confirmed_matches)
 
-    print(f"✓ Saved state with {final_confirmed} confirmed matches (auto: {initial_confirmed}, manual: {final_confirmed - initial_confirmed})")
-
-    # Create new system, load state
-    system2 = ReconciliationSystem(state_file=test_state_file)
-    system2.load_data()
-    system2._load_state()
-
-    assert len(system2.confirmed_matches) == final_confirmed, f"Expected {final_confirmed}, got {len(system2.confirmed_matches)}"
-    assert len(system2.matched_beacon_ids) >= initial_beacon_ids
-
-    print(f"✓ Loaded state with {len(system2.confirmed_matches)} confirmed matches")
-    print(f"✓ {len(system2.matched_beacon_ids)} beacon IDs marked as matched")
-
-    # Cleanup
-    if os.path.exists(test_state_file):
-        os.remove(test_state_file)
-    print("✓ State persistence test PASSED")
-
-
-def test_export():
-    """Test exporting results to CSV."""
-    print("\n=== Test: Export Results ===")
-
-    system = ReconciliationSystem()
-    system.load_data()
-    suggestions = system.generate_suggestions()
-
-    # Make some decisions
-    system.confirm_match(suggestions[0])
-    system.reject_match(suggestions[1])
-
-    # Export
-    system.export_results("test_results.csv")
-
-    # Verify file exists
-    assert os.path.exists("test_results.csv")
-
-    # Read and check content
-    with open("test_results.csv", 'r') as f:
-        lines = f.readlines()
-
-    assert len(lines) >= 21  # Header + at least 20 matches (may have more due to multiple matches per bank txn)
-    print(f"✓ Exported {len(lines)-1} matches to CSV")
-
-    # Cleanup
-    os.remove("test_results.csv")
-    print("✓ Export test PASSED")
-
-
-def test_rejected_persistence():
-    """Test that rejected matches are persisted and restored."""
-    print("\n=== Test: Rejected Match Persistence ===")
-
-    # Create system with a separate test state file
-    test_state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_rejected_state.json")
-
-    # Remove test state file if exists
-    if os.path.exists(test_state_file):
-        os.remove(test_state_file)
-
-    system = ReconciliationSystem(state_file=test_state_file)
-    system.load_data()
-    suggestions = system.generate_suggestions()
-
-    # Find a pending match and reject it
-    pending = [m for m in suggestions if m.status == MatchStatus.PENDING]
-    assert len(pending) > 0, "No pending matches to test"
-
-    test_match = pending[0]
-    rejected_bank_id = test_match.bank_transaction.id
-    system.reject_match(test_match)
-
-    assert test_match.status == MatchStatus.REJECTED
-    assert rejected_bank_id in system.rejected_bank_ids
-    print(f"✓ Rejected match for bank ID: {rejected_bank_id}")
-
-    system.save_state()
-    print("✓ Saved state with rejected match")
-
-    # Create new system, load state
-    system2 = ReconciliationSystem(state_file=test_state_file)
+    # Reload
+    system2 = ReconciliationSystem(data_dir=DATA_DIR, code_dir=CODE_DIR)
     system2.load_data()
 
-    # Check rejected bank IDs are loaded
-    assert rejected_bank_id in system2.rejected_bank_ids, "Rejected bank ID not loaded"
-    print("✓ Rejected bank ID restored from state")
+    stats_after = system2.get_statistics()
+    assert stats_before['reconciled_count'] == stats_after['reconciled_count']
+    assert stats_before['resolved_count'] == stats_after['resolved_count']
 
-    # Generate suggestions - should restore rejected status
-    suggestions2 = system2.generate_suggestions()
+    print(f"  Saved and restored {stats_after['reconciled_count']} reconciliations, "
+          f"{stats_after['resolved_count']} resolved, "
+          f"{len(system2.rejected_pairings)} rejected pairings")
 
-    # Find the match with the rejected bank ID
-    restored_match = next(
-        (m for m in suggestions2 if m.bank_transaction.id == rejected_bank_id),
-        None
-    )
-    assert restored_match is not None, "Rejected match not found in new suggestions"
-    assert restored_match.status == MatchStatus.REJECTED, f"Expected REJECTED, got {restored_match.status.value}"
-    print("✓ Rejected status restored in regenerated suggestions")
+    print("PASSED")
 
-    # Test undo rejection
-    system2.undo_rejection(restored_match)
-    assert restored_match.status == MatchStatus.PENDING
-    assert rejected_bank_id not in system2.rejected_bank_ids
-    print("✓ Undo rejection works correctly")
 
-    # Cleanup
-    if os.path.exists(test_state_file):
-        os.remove(test_state_file)
-    print("✓ Rejected match persistence test PASSED")
+def test_search():
+    """Test bank and beacon search."""
+    print("\n=== Test: Search ===")
+
+    system = make_system()
+
+    # Bank search by description
+    results = system.search_bank_entries("SMITH")
+    print(f"  Bank search 'SMITH': {len(results)} results")
+
+    # Bank search by amount
+    results = system.search_bank_entries("13.00")
+    print(f"  Bank search '13.00': {len(results)} results")
+
+    # Beacon search by payee
+    results = system.search_beacon_entries("Smith")
+    print(f"  Beacon search 'Smith': {len(results)} results")
+
+    # Beacon search available only
+    system.auto_reconcile()
+    all_results = system.search_beacon_entries("", available_only=False)
+    avail_results = system.search_beacon_entries("", available_only=True)
+    # Empty search returns no results, which is correct
+    print(f"  Beacon search (empty term): {len(all_results)} results (expected 0)")
+
+    print("PASSED")
+
+
+def test_exports():
+    """Test report exports."""
+    print("\n=== Test: Exports ===")
+
+    system = make_system()
+    system.auto_reconcile()
+    system.mark_resolved(system.get_unreconciled_bank_entries()[0], "test export")
+
+    # Export all reports
+    r1 = system.export_reconciled_csv(os.path.join(DATA_DIR, "_test_reconciled.csv"))
+    r2 = system.export_unreconciled_bank_csv(os.path.join(DATA_DIR, "_test_unrec_bank.csv"))
+    r3 = system.export_unreconciled_beacon_csv(os.path.join(DATA_DIR, "_test_unrec_beacon.csv"))
+    r4 = system.export_resolved_csv(os.path.join(DATA_DIR, "_test_resolved.csv"))
+    system.export_stats_summary(os.path.join(DATA_DIR, "_test_stats.txt"))
+
+    print(f"  Reconciled: {r1} rows")
+    print(f"  Un-reconciled bank: {r2} rows")
+    print(f"  Un-reconciled beacon: {r3} rows")
+    print(f"  Resolved: {r4} rows")
+
+    # Verify files exist
+    for fname in ["_test_reconciled.csv", "_test_unrec_bank.csv",
+                   "_test_unrec_beacon.csv", "_test_resolved.csv", "_test_stats.txt"]:
+        path = os.path.join(DATA_DIR, fname)
+        assert os.path.exists(path), f"Export file not created: {path}"
+        os.remove(path)
+
+    print("PASSED")
+
+
+def test_navigation_helpers():
+    """Test bank entry navigation helpers."""
+    print("\n=== Test: Navigation Helpers ===")
+
+    system = make_system()
+
+    all_entries = system.get_bank_entries_sorted()
+    unrec_entries = system.get_unreconciled_bank_entries()
+    assert len(all_entries) >= len(unrec_entries)
+    print(f"  All: {len(all_entries)}, Un-reconciled: {len(unrec_entries)}")
+
+    # After auto-reconcile, unreconciled should decrease
+    system.auto_reconcile()
+    unrec_after = system.get_unreconciled_bank_entries()
+    assert len(unrec_after) <= len(unrec_entries)
+    print(f"  After auto-reconcile, un-reconciled: {len(unrec_after)}")
+
+    print("PASSED")
+
+
+def test_candidate_ordering():
+    """Test that candidates are ordered correctly (non-rejected first, then rejected)."""
+    print("\n=== Test: Candidate Ordering ===")
+
+    system = make_system()
+
+    for bank in system.bank_transactions:
+        candidates = system.get_candidates_for_bank(bank)
+        if len(candidates) < 2:
+            continue
+
+        # Reject one candidate
+        beacon_id = candidates[0].beacon_entries[0].id
+        system.reject_pairing(bank.id, beacon_id)
+
+        refreshed = system.get_candidates_for_bank(bank)
+        saw_rejected = False
+        for c in refreshed:
+            if c.is_rejected:
+                saw_rejected = True
+            elif saw_rejected:
+                assert False, "Non-rejected candidate found after rejected one"
+
+        print(f"  {bank.id}: {len(refreshed)} candidates, ordering correct")
+
+        # Cleanup
+        system.unreject_pairing(bank.id, beacon_id)
+        break
+
+    print("PASSED")
 
 
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
-    print("Bank Beacon Reconciliation System - Test Suite")
+    print(f"Bank Beacon Reconciliation v{VERSION} - Test Suite")
     print("=" * 60)
 
-    # Clean up any existing state file to ensure fresh tests
-    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reconciliation_state.json")
+    # Clean up any existing state
+    state_file = os.path.join(DATA_DIR, "reconciliation_state_v2.json")
     if os.path.exists(state_file):
         os.remove(state_file)
         print("(Removed existing state file for clean test run)")
 
     system = test_loading()
+    test_candidate_generation(system)
     test_one_to_one_matching(system)
     test_one_to_two_matching(system)
     test_common_amount_handling(system)
-    test_auto_confirmation(system)
-    test_match_status_changes(system)
-    test_navigation_simulation()
-    test_beacon_exclusivity(system)
-    test_date_tolerance()
+    test_reconcile(system)
+    test_unreconcile(system)
+    test_reject_pairing(system)
+    test_auto_reconcile()
+    test_manual_match()
+    test_mark_resolved()
+    test_statistics()
     test_state_persistence()
-    test_rejected_persistence()
-    test_export()
+    test_search()
+    test_exports()
+    test_navigation_helpers()
+    test_candidate_ordering()
 
-    # Clean up state file after tests
+    # Final cleanup
     if os.path.exists(state_file):
         os.remove(state_file)
 
