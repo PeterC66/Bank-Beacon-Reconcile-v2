@@ -1,0 +1,9 @@
+{
+  "bank_file": "Bank_Transactions.csv",
+  "beacon_file": "Beacon_Entries.csv",
+  "common_amounts": ["13.00", "9.50", "6.50"],
+  "date_tolerance_days": 7,
+  "trans_no_limit": 5,
+  "auto_reconcile_common_threshold": 0.90,
+  "auto_reconcile_other_threshold": 0.80
+}
