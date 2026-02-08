@@ -31,7 +31,7 @@ def parse_currency(value):
 
 def read_to_reconcile(filepath):
     """Read the tab-separated to_reconcile.csv file.
-    Returns a dict of {transaction_number: amount} where amount = In - Out.
+    Returns a dict of {transaction_number: (amount, date)} where amount = In - Out.
     """
     transactions = {}
     duplicates = []
@@ -44,15 +44,17 @@ def read_to_reconcile(filepath):
             in_val = parse_currency(row.get("In", ""))
             out_val = parse_currency(row.get("Out", ""))
             amount = in_val - out_val
+            date = row.get("Date", "").strip()
             if trans_no in transactions:
                 duplicates.append(trans_no)
-            transactions[trans_no] = amount
+            payee = row.get("Payee / Batch Number", "").strip()
+            transactions[trans_no] = (amount, date, payee)
     return transactions, duplicates
 
 
 def read_report_reconciled(filepath):
     """Read the comma-separated report_reconciled.csv file.
-    Returns a dict of {beacon_trans_no: beacon_amount}.
+    Returns a dict of {beacon_trans_no: (beacon_amount, bank_date, beacon_date)}.
     """
     transactions = {}
     duplicates = []
@@ -63,9 +65,12 @@ def read_report_reconciled(filepath):
             if trans_no == "":
                 continue
             amount = Decimal(row["beacon_amount"].strip())
+            bank_date = row.get("bank_date", "").strip()
+            beacon_date = row.get("beacon_date", "").strip()
             if trans_no in transactions:
                 duplicates.append(trans_no)
-            transactions[trans_no] = amount
+            bank_desc = row.get("bank_description", "").strip()
+            transactions[trans_no] = (amount, bank_date, beacon_date, bank_desc)
     return transactions, duplicates
 
 
@@ -84,8 +89,8 @@ def compare(to_reconcile, report_reconciled):
 
     mismatches = []
     for trans_no in sorted(keys_first & keys_second):
-        amt_first = to_reconcile[trans_no]
-        amt_second = report_reconciled[trans_no]
+        amt_first = to_reconcile[trans_no][0]
+        amt_second = report_reconciled[trans_no][0]
         if amt_first != amt_second:
             mismatches.append((trans_no, amt_first, amt_second))
 
@@ -108,8 +113,8 @@ def main():
 
     only_in_first, only_in_second, mismatches = compare(to_reconcile, report_reconciled)
 
-    total_first = sum(to_reconcile.values())
-    total_second = sum(report_reconciled.values())
+    total_first = sum(v[0] for v in to_reconcile.values())
+    total_second = sum(v[0] for v in report_reconciled.values())
     matched_count = len(set(to_reconcile.keys()) & set(report_reconciled.keys())) - len(mismatches)
 
     lines = []
@@ -150,20 +155,26 @@ def main():
 
     # Only in first
     lines.append("TRANSACTIONS ONLY IN to_reconcile.csv")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     if only_in_first:
+        lines.append(f"  {'Transaction':>10}  {'Date':<12}  {'Payee / Batch Number':<30}  {'Amount':>12}")
+        lines.append(f"  {'----------':>10}  {'----':<12}  {'--------------------':<30}  {'------':>12}")
         for trans_no in only_in_first:
-            lines.append(f"  {trans_no:>10}    amount: {to_reconcile[trans_no]:>12}")
+            amount, date, payee = to_reconcile[trans_no]
+            lines.append(f"  {trans_no:>10}  {date:<12}  {payee:<30}  {amount:>12}")
     else:
         lines.append("  (none)")
     lines.append("")
 
     # Only in second
     lines.append("TRANSACTIONS ONLY IN report_reconciled.csv")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     if only_in_second:
+        lines.append(f"  {'Trans No':>10}  {'Bank Date':<12}  {'Beacon Date':<12}  {'Bank Description':<30}  {'Amount':>12}")
+        lines.append(f"  {'--------':>10}  {'---------':<12}  {'-----------':<12}  {'----------------':<30}  {'------':>12}")
         for trans_no in only_in_second:
-            lines.append(f"  {trans_no:>10}    amount: {report_reconciled[trans_no]:>12}")
+            amount, bank_date, beacon_date, bank_desc = report_reconciled[trans_no]
+            lines.append(f"  {trans_no:>10}  {bank_date:<12}  {beacon_date:<12}  {bank_desc:<30}  {amount:>12}")
     else:
         lines.append("  (none)")
     lines.append("")
