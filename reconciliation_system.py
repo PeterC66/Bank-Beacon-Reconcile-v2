@@ -1233,6 +1233,111 @@ class ReconciliationSystem:
         return False
 
     # -------------------------------------------------------------------
+    # Consistency check
+    # -------------------------------------------------------------------
+
+    def check_consistency(self) -> List[Tuple[Reconciliation, str]]:
+        """Check for inconsistencies in reconciliations.
+
+        Returns a list of (reconciliation, reason) tuples.
+
+        Checks:
+        1. Each beacon entry appears in at most one reconciliation
+        2. Each bank entry appears in at most one reconciliation
+        3. For each reconciliation, bank amount == sum of beacon amounts
+        """
+        inconsistencies = []
+        bank_by_id = {b.id: b for b in self.bank_transactions}
+        beacon_by_id = {b.id: b for b in self.beacon_entries}
+
+        # Check 1: Beacon uniqueness
+        beacon_to_recs: Dict[str, List[Reconciliation]] = defaultdict(list)
+        for rec in self.reconciliations:
+            for bid in rec.beacon_ids:
+                beacon_to_recs[bid].append(rec)
+
+        reported_beacon_groups = set()
+        for bid, recs in beacon_to_recs.items():
+            if len(recs) > 1:
+                key = frozenset(r.bank_id for r in recs)
+                if key in reported_beacon_groups:
+                    continue
+                reported_beacon_groups.add(key)
+                beacon = beacon_by_id.get(bid)
+                beacon_desc = f"{beacon.payee} {chr(163)}{beacon.amount}" if beacon else bid
+                rec_ids = ", ".join(r.bank_id for r in recs)
+                inconsistencies.append(
+                    (recs[0], f"Beacon {bid} ({beacon_desc}) is in multiple reconciliations: {rec_ids}")
+                )
+
+        # Check 2: Bank uniqueness
+        bank_to_recs: Dict[str, List[Reconciliation]] = defaultdict(list)
+        for rec in self.reconciliations:
+            bank_to_recs[rec.bank_id].append(rec)
+
+        for bank_id, recs in bank_to_recs.items():
+            if len(recs) > 1:
+                inconsistencies.append(
+                    (recs[0], f"Bank {bank_id} appears in {len(recs)} reconciliations")
+                )
+
+        # Check 3: Amount matching
+        for rec in self.reconciliations:
+            if rec.status == 'manually_resolved':
+                continue  # No beacon entries to check
+            bank = bank_by_id.get(rec.bank_id)
+            if not bank:
+                inconsistencies.append(
+                    (rec, f"Bank {rec.bank_id} not found in loaded data")
+                )
+                continue
+            beacon_total = Decimal('0')
+            for bid in rec.beacon_ids:
+                beacon = beacon_by_id.get(bid)
+                if beacon:
+                    beacon_total += beacon.amount
+                else:
+                    inconsistencies.append(
+                        (rec, f"Beacon {bid} not found in loaded data (in reconciliation for {rec.bank_id})")
+                    )
+            if rec.beacon_ids and beacon_total != bank.amount:
+                inconsistencies.append(
+                    (rec, f"Amount mismatch: Bank {chr(163)}{bank.amount} != Beacon total {chr(163)}{beacon_total}")
+                )
+
+        return inconsistencies
+
+    # -------------------------------------------------------------------
+    # Member beacon lookup
+    # -------------------------------------------------------------------
+
+    def get_beacon_entries_for_member(self, member_name: str) -> List[BeaconEntry]:
+        """Get all beacon entries where member_1 matches the given name.
+
+        Args:
+            member_name: The member name to match (forename+surname, case-insensitive)
+
+        Returns list of BeaconEntry sorted by date.
+        """
+        if not member_name:
+            return []
+        name_upper = member_name.replace(' ', '').upper()
+        results = []
+        for beacon in self.beacon_entries:
+            m1 = beacon.member_1.replace(' ', '').upper()
+            if m1 and m1 == name_upper:
+                results.append(beacon)
+        results.sort(key=lambda b: b.date)
+        return results
+
+    def get_bank_id_for_beacon(self, beacon_id: str) -> Optional[str]:
+        """Get the bank_id that a beacon is reconciled with, if any."""
+        for rec in self.reconciliations:
+            if beacon_id in rec.beacon_ids:
+                return rec.bank_id
+        return None
+
+    # -------------------------------------------------------------------
     # Export / Reports
     # -------------------------------------------------------------------
 

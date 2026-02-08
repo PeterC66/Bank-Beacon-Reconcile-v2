@@ -474,6 +474,67 @@ def test_candidate_ordering():
     print("PASSED")
 
 
+def test_consistency_check():
+    """Test consistency check on clean data and manufactured inconsistency."""
+    print("\n=== Test: Consistency Check ===")
+
+    system = make_system()
+    system.auto_reconcile()
+
+    # Clean data should have no inconsistencies
+    issues = system.check_consistency()
+    print(f"  After auto-reconcile: {len(issues)} issues (expected 0)")
+    assert len(issues) == 0, f"Expected 0 issues, got {len(issues)}"
+
+    # Mark resolved should also be clean
+    unreconciled = system.get_unreconciled_bank_entries()
+    if unreconciled:
+        system.mark_resolved(unreconciled[0], "test")
+    issues = system.check_consistency()
+    assert len(issues) == 0
+
+    print("PASSED")
+
+
+def test_member_beacon_lookup():
+    """Test looking up beacon entries by member name."""
+    print("\n=== Test: Member Beacon Lookup ===")
+
+    system = make_system()
+
+    # Get a beacon with a member_1 field
+    beacons_with_member = [b for b in system.beacon_entries if b.member_1]
+    if beacons_with_member:
+        member = beacons_with_member[0].member_1
+        results = system.get_beacon_entries_for_member(member)
+        print(f"  Member '{member}': {len(results)} beacon entries")
+        assert len(results) > 0
+
+        # Results should be sorted by date
+        dates = [b.date for b in results]
+        assert dates == sorted(dates), "Results should be sorted by date"
+    else:
+        print("  SKIPPED (no beacons with member_1 in sample data)")
+
+    # Empty member should return nothing
+    results = system.get_beacon_entries_for_member("")
+    assert len(results) == 0
+
+    # get_bank_id_for_beacon on unreconciled should return None
+    assert system.get_bank_id_for_beacon("BEACON_9999") is None
+
+    # Reconcile something and check get_bank_id_for_beacon
+    system.auto_reconcile()
+    for rec in system.reconciliations:
+        if rec.beacon_ids:
+            bank_id = system.get_bank_id_for_beacon(rec.beacon_ids[0])
+            assert bank_id == rec.bank_id
+            print(f"  get_bank_id_for_beacon({rec.beacon_ids[0]}) = {bank_id}")
+            break
+
+    print("PASSED")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -503,6 +564,8 @@ def run_all_tests():
     test_exports()
     test_navigation_helpers()
     test_candidate_ordering()
+    test_consistency_check()
+    test_member_beacon_lookup()
 
     # Final cleanup
     if os.path.exists(state_file):

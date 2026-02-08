@@ -82,6 +82,10 @@ class ReconciliationGUI:
         self.beacon_search_results: list = []  # BeaconEntry objects from search
         self.beacon_search_active: bool = False
 
+        # Consistency check state
+        self.inconsistencies: list = []  # [(Reconciliation, reason), ...]
+        self.inconsistency_index: int = 0
+
         # Build bank list
         self._rebuild_bank_list()
 
@@ -212,6 +216,9 @@ class ReconciliationGUI:
         self._create_bank_panel(content_frame)
         self._create_beacon_panel(content_frame)
 
+        # --- Member beacon transactions panel ---
+        self._create_member_panel(main_frame)
+
         # --- Action bar ---
         self._create_action_bar(main_frame)
 
@@ -333,6 +340,9 @@ class ReconciliationGUI:
         self.bank_search_result = ttk.Label(search_frame, text="", foreground='gray',
                                              style='Small.TLabel')
         self.bank_search_result.pack(side=tk.LEFT, padx=5)
+        # Search format hint
+        ttk.Label(bank_outer, text='[name | "exact" | £amount | date | BANK_id]',
+                  foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     # -------------------------------------------------------------------
     # Right panel: Beacon candidate
@@ -399,8 +409,10 @@ class ReconciliationGUI:
                                               justify='center')
 
         # Beacon search
-        search_frame = ttk.Frame(beacon_outer)
-        search_frame.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+        beacon_search_area = ttk.Frame(beacon_outer)
+        beacon_search_area.pack(fill=tk.X, side=tk.BOTTOM, pady=(8, 0))
+        search_frame = ttk.Frame(beacon_search_area)
+        search_frame.pack(fill=tk.X)
         ttk.Label(search_frame, text="Search:", style='Small.TLabel').pack(side=tk.LEFT)
         self.beacon_search_entry = ttk.Entry(search_frame, width=20)
         self.beacon_search_entry.pack(side=tk.LEFT, padx=3)
@@ -413,6 +425,9 @@ class ReconciliationGUI:
         self.beacon_search_result = ttk.Label(search_frame, text="", foreground='gray',
                                                style='Small.TLabel')
         self.beacon_search_result.pack(side=tk.LEFT, padx=5)
+        # Search format hint
+        ttk.Label(beacon_search_area, text='[name | "exact" | £amount | date | trans_no | BEACON_id]',
+                  foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     def _create_beacon_entry_widgets(self, frame):
         """Create widgets for a single beacon entry display."""
@@ -464,6 +479,184 @@ class ReconciliationGUI:
         return widgets
 
     # -------------------------------------------------------------------
+    # Member beacon transactions panel
+    # -------------------------------------------------------------------
+
+    def _create_member_panel(self, parent):
+        """Create the member beacon transactions panel below the main panels."""
+        self.member_panel = ttk.LabelFrame(parent, text="Member's Beacon Transactions",
+                                            padding="5")
+        self.member_panel.pack(fill=tk.X, pady=(5, 0))
+
+        self.member_panel_header = ttk.Label(self.member_panel, text="",
+                                              style='Small.TLabel', foreground='#006600')
+        self.member_panel_header.pack(fill=tk.X)
+
+        # Treeview for beacon transactions
+        tree_frame = ttk.Frame(self.member_panel)
+        tree_frame.pack(fill=tk.X)
+
+        columns = ('trans_no', 'date', 'amount', 'payee', 'status')
+        self.member_tree = ttk.Treeview(tree_frame, columns=columns, show='headings',
+                                         height=6, selectmode='browse')
+        self.member_tree.heading('trans_no', text='Trans No')
+        self.member_tree.heading('date', text='Date')
+        self.member_tree.heading('amount', text='Amount')
+        self.member_tree.heading('payee', text='Payee')
+        self.member_tree.heading('status', text='Status')
+
+        self.member_tree.column('trans_no', width=80, minwidth=60)
+        self.member_tree.column('date', width=90, minwidth=70)
+        self.member_tree.column('amount', width=80, minwidth=60)
+        self.member_tree.column('payee', width=200, minwidth=100)
+        self.member_tree.column('status', width=120, minwidth=80)
+
+        tree_scroll = ttk.Scrollbar(tree_frame, orient='vertical',
+                                     command=self.member_tree.yview)
+        self.member_tree.configure(yscrollcommand=tree_scroll.set)
+        self.member_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Tag for reconciled rows
+        self.member_tree.tag_configure('reconciled', foreground='#006600')
+        self.member_tree.tag_configure('unreconciled', foreground='#333333')
+
+        # Bind click
+        self.member_tree.bind('<Double-1>', self._on_member_tree_click)
+
+        # Store beacon_id for each tree item (for click navigation)
+        self._member_tree_beacon_ids = {}
+
+    def _update_member_panel(self):
+        """Update the member beacon transactions panel."""
+        # Clear existing rows
+        for item in self.member_tree.get_children():
+            self.member_tree.delete(item)
+        self._member_tree_beacon_ids = {}
+        self.member_panel_header.config(text="")
+
+        bank = self._current_bank()
+        if not bank:
+            return
+
+        # Determine which member(s) to show
+        member_names = []
+        source_label = ""
+
+        # Check if we have a beacon candidate or reconciled beacon
+        rec = self.system.get_reconciliation_for_bank(bank.id)
+        if rec and rec.status != 'manually_resolved' and rec.beacon_ids:
+            # Reconciled - use beacon's member_1
+            beacons = self.system.get_beacon_entries_for_reconciliation(rec)
+            for b in beacons:
+                if b.member_1 and b.member_1 not in member_names:
+                    member_names.append(b.member_1)
+                if b.member_2 and b.member_2 not in member_names:
+                    member_names.append(b.member_2)
+        elif rec and rec.status == 'manually_resolved':
+            # Manually resolved - use bank-derived member
+            member_names = self._get_member_names_from_bank(bank)
+            if member_names:
+                source_label = " (from bank description)"
+        elif not self.beacon_search_active:
+            # Not reconciled - use current candidate's member_1
+            candidate = self._current_candidate()
+            if candidate:
+                for b in candidate.beacon_entries:
+                    if b.member_1 and b.member_1 not in member_names:
+                        member_names.append(b.member_1)
+                    if b.member_2 and b.member_2 not in member_names:
+                        member_names.append(b.member_2)
+            else:
+                # No candidate either - fall back to bank-derived member
+                member_names = self._get_member_names_from_bank(bank)
+                if member_names:
+                    source_label = " (from bank description)"
+
+        if not member_names:
+            self.member_panel_header.config(text="No member identified")
+            return
+
+        # Build header
+        header_parts = []
+        for name in member_names:
+            # Try to find a readable name from member_lookup
+            readable = self._get_readable_member_name(name)
+            if readable:
+                header_parts.append(f"{readable} [{name}]")
+            else:
+                header_parts.append(name)
+        self.member_panel_header.config(
+            text=", ".join(header_parts) + source_label
+        )
+
+        # Populate tree with all beacon entries for these members
+        for member_name in member_names:
+            beacons = self.system.get_beacon_entries_for_member(member_name)
+            for beacon in beacons:
+                # Determine reconciled status
+                bank_id = self.system.get_bank_id_for_beacon(beacon.id)
+                if bank_id:
+                    status = f"Reconciled ({bank_id})"
+                    tag = 'reconciled'
+                else:
+                    status = "Un-reconciled"
+                    tag = 'unreconciled'
+
+                item_id = self.member_tree.insert('', 'end', values=(
+                    beacon.trans_no,
+                    beacon.date.strftime('%d/%m/%Y'),
+                    f"{chr(163)}{beacon.amount}",
+                    beacon.payee,
+                    status
+                ), tags=(tag,))
+                self._member_tree_beacon_ids[item_id] = (beacon.id, bank_id)
+
+    def _get_member_names_from_bank(self, bank: BankTransaction) -> list:
+        """Get member names (forename+surname format) from bank description via lookup."""
+        member_numbers = self.system.extract_member_numbers(bank.description)
+        names = []
+        for num in member_numbers:
+            member = self.system.lookup_member(num)
+            if member:
+                name = member['forename'] + member['surname']
+                if name not in names:
+                    names.append(name)
+        return names
+
+    def _get_readable_member_name(self, member_code: str) -> str:
+        """Try to find a readable name for a member code like 'SmithJ'."""
+        for mem_no, info in self.system.member_lookup.items():
+            full = info['forename'] + info['surname']
+            if full.replace(' ', '').upper() == member_code.replace(' ', '').upper():
+                return f"{info['forename']} {info['surname']}"
+        return ""
+
+    def _on_member_tree_click(self, event):
+        """Handle double-click on a row in the member transactions tree."""
+        selection = self.member_tree.selection()
+        if not selection:
+            return
+
+        item_id = selection[0]
+        beacon_id, bank_id = self._member_tree_beacon_ids.get(item_id, (None, None))
+
+        if not bank_id:
+            return  # Un-reconciled, do nothing
+
+        # Navigate to the reconciled bank entry
+        if not self.show_all_bank:
+            self.show_all_var.set(True)
+            self._on_show_all_changed()
+
+        for i, bank in enumerate(self.bank_list):
+            if bank.id == bank_id:
+                self.bank_index = i
+                self._refresh_candidates()
+                self._update_display()
+                break
+
+    # -------------------------------------------------------------------
     # Action bar
     # -------------------------------------------------------------------
 
@@ -504,6 +697,22 @@ class ReconciliationGUI:
 
         ttk.Button(row1, text="Reports",
                     command=self._on_reports).pack(side=tk.LEFT, padx=3)
+
+        ttk.Separator(row1, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
+
+        ttk.Button(row1, text="Check Consistency",
+                    command=self._on_consistency_check).pack(side=tk.LEFT, padx=3)
+        self.inconsistency_label = ttk.Label(row1, text="", foreground='gray',
+                                              style='Small.TLabel')
+        self.inconsistency_label.pack(side=tk.LEFT, padx=3)
+        self.inconsistency_prev_btn = ttk.Button(row1, text="< Issue",
+                                                   command=self._on_inconsistency_prev,
+                                                   state=tk.DISABLED)
+        self.inconsistency_prev_btn.pack(side=tk.LEFT, padx=1)
+        self.inconsistency_next_btn = ttk.Button(row1, text="Issue >",
+                                                   command=self._on_inconsistency_next,
+                                                   state=tk.DISABLED)
+        self.inconsistency_next_btn.pack(side=tk.LEFT, padx=1)
 
         # Row 2: Manual match + resolved
         row2 = ttk.Frame(action_frame)
@@ -549,6 +758,7 @@ class ReconciliationGUI:
         self._update_stats()
         self._update_bank_panel()
         self._update_beacon_panel()
+        self._update_member_panel()
         self._update_action_states()
 
     def _update_stats(self):
@@ -659,6 +869,11 @@ class ReconciliationGUI:
 
         bank = self._current_bank()
 
+        # Handle beacon search results mode (check BEFORE reconciled check)
+        if self.beacon_search_active and self.beacon_search_results:
+            self._show_beacon_search_result()
+            return
+
         # If bank is reconciled, show reconciled beacon info instead
         if bank and self.system.is_bank_reconciled(bank.id):
             rec = self.system.get_reconciliation_for_bank(bank.id)
@@ -683,11 +898,6 @@ class ReconciliationGUI:
             self.score_breakdown_label.config(text="")
             self.beacon_prev_btn.config(state=tk.DISABLED)
             self.beacon_next_btn.config(state=tk.DISABLED)
-            return
-
-        # Handle beacon search results mode
-        if self.beacon_search_active and self.beacon_search_results:
-            self._show_beacon_search_result()
             return
 
         # Normal candidate mode
@@ -1108,6 +1318,78 @@ class ReconciliationGUI:
         self.beacon_search_result.config(text="")
         self._refresh_candidates()
         self._update_display()
+
+    # -------------------------------------------------------------------
+    # Consistency check
+    # -------------------------------------------------------------------
+
+    def _on_consistency_check(self):
+        """Run consistency check on all reconciliations."""
+        self.inconsistencies = self.system.check_consistency()
+        self.inconsistency_index = 0
+
+        if not self.inconsistencies:
+            self.inconsistency_label.config(text="")
+            self.inconsistency_prev_btn.config(state=tk.DISABLED)
+            self.inconsistency_next_btn.config(state=tk.DISABLED)
+            messagebox.showinfo("Consistency Check", "No inconsistencies found.")
+            return
+
+        self._update_inconsistency_nav()
+        self._navigate_to_inconsistency(0)
+
+    def _update_inconsistency_nav(self):
+        """Update inconsistency navigation UI."""
+        if not self.inconsistencies:
+            self.inconsistency_label.config(text="")
+            self.inconsistency_prev_btn.config(state=tk.DISABLED)
+            self.inconsistency_next_btn.config(state=tk.DISABLED)
+            return
+
+        self.inconsistency_label.config(
+            text=f"Issue {self.inconsistency_index + 1}/{len(self.inconsistencies)}: "
+                 f"{self.inconsistencies[self.inconsistency_index][1]}",
+            foreground='#CC0000'
+        )
+        self.inconsistency_prev_btn.config(
+            state=tk.NORMAL if self.inconsistency_index > 0 else tk.DISABLED
+        )
+        self.inconsistency_next_btn.config(
+            state=tk.NORMAL if self.inconsistency_index < len(self.inconsistencies) - 1 else tk.DISABLED
+        )
+
+    def _navigate_to_inconsistency(self, index):
+        """Navigate to the bank entry involved in an inconsistency."""
+        if not self.inconsistencies or index >= len(self.inconsistencies):
+            return
+
+        self.inconsistency_index = index
+        rec, reason = self.inconsistencies[index]
+
+        # Find the bank entry in the current list
+        # Make sure show_all is on so we can navigate to reconciled entries
+        if not self.show_all_bank:
+            self.show_all_var.set(True)
+            self._on_show_all_changed()
+
+        for i, bank in enumerate(self.bank_list):
+            if bank.id == rec.bank_id:
+                self.bank_index = i
+                self._refresh_candidates()
+                self._update_display()
+                break
+
+        self._update_inconsistency_nav()
+
+    def _on_inconsistency_prev(self):
+        """Navigate to previous inconsistency."""
+        if self.inconsistency_index > 0:
+            self._navigate_to_inconsistency(self.inconsistency_index - 1)
+
+    def _on_inconsistency_next(self):
+        """Navigate to next inconsistency."""
+        if self.inconsistency_index < len(self.inconsistencies) - 1:
+            self._navigate_to_inconsistency(self.inconsistency_index + 1)
 
     # -------------------------------------------------------------------
     # Reports
