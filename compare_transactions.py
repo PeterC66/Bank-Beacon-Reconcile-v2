@@ -99,8 +99,9 @@ def main():
 
     for f in [file_first, file_second]:
         if not os.path.exists(f):
-            print(f"Error: '{f}' not found in the current directory.")
-            sys.exit(1)
+            raise FileNotFoundError(
+                f"'{f}' not found in the current directory: {os.getcwd()}"
+            )
 
     to_reconcile, dups_first = read_to_reconcile(file_first)
     report_reconciled, dups_second = read_report_reconciled(file_second)
@@ -190,4 +191,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\nERROR: {e}")
+    input("\nPress Enter to close...")
