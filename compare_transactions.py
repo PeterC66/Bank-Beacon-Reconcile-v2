@@ -47,7 +47,8 @@ def read_to_reconcile(filepath):
             date = row.get("Date", "").strip()
             if trans_no in transactions:
                 duplicates.append(trans_no)
-            transactions[trans_no] = (amount, date)
+            payee = row.get("Payee / Batch Number", "").strip()
+            transactions[trans_no] = (amount, date, payee)
     return transactions, duplicates
 
 
@@ -68,7 +69,8 @@ def read_report_reconciled(filepath):
             beacon_date = row.get("beacon_date", "").strip()
             if trans_no in transactions:
                 duplicates.append(trans_no)
-            transactions[trans_no] = (amount, bank_date, beacon_date)
+            bank_desc = row.get("bank_description", "").strip()
+            transactions[trans_no] = (amount, bank_date, beacon_date, bank_desc)
     return transactions, duplicates
 
 
@@ -153,22 +155,26 @@ def main():
 
     # Only in first
     lines.append("TRANSACTIONS ONLY IN to_reconcile.csv")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     if only_in_first:
+        lines.append(f"  {'Transaction':>10}  {'Date':<12}  {'Payee / Batch Number':<30}  {'Amount':>12}")
+        lines.append(f"  {'----------':>10}  {'----':<12}  {'--------------------':<30}  {'------':>12}")
         for trans_no in only_in_first:
-            amount, date = to_reconcile[trans_no]
-            lines.append(f"  {trans_no:>10}    date: {date:<12}  amount: {amount:>12}")
+            amount, date, payee = to_reconcile[trans_no]
+            lines.append(f"  {trans_no:>10}  {date:<12}  {payee:<30}  {amount:>12}")
     else:
         lines.append("  (none)")
     lines.append("")
 
     # Only in second
     lines.append("TRANSACTIONS ONLY IN report_reconciled.csv")
-    lines.append("-" * 70)
+    lines.append("-" * 90)
     if only_in_second:
+        lines.append(f"  {'Trans No':>10}  {'Bank Date':<12}  {'Beacon Date':<12}  {'Bank Description':<30}  {'Amount':>12}")
+        lines.append(f"  {'--------':>10}  {'---------':<12}  {'-----------':<12}  {'----------------':<30}  {'------':>12}")
         for trans_no in only_in_second:
-            amount, bank_date, beacon_date = report_reconciled[trans_no]
-            lines.append(f"  {trans_no:>10}    bank_date: {bank_date:<12}  beacon_date: {beacon_date:<12}  amount: {amount:>12}")
+            amount, bank_date, beacon_date, bank_desc = report_reconciled[trans_no]
+            lines.append(f"  {trans_no:>10}  {bank_date:<12}  {beacon_date:<12}  {bank_desc:<30}  {amount:>12}")
     else:
         lines.append("  (none)")
     lines.append("")
