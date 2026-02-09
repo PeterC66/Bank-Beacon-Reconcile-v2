@@ -1038,8 +1038,18 @@ class ReconciliationGUI:
         candidate = self._current_candidate()
 
         # Reconcile: enabled if bank not reconciled and there's a candidate
+        # Also enabled during beacon search if the displayed beacon is not reconciled
+        can_reconcile = False
+        if bank and not is_reconciled:
+            if self.beacon_search_active and self.beacon_search_results:
+                idx = min(self.candidate_index, len(self.beacon_search_results) - 1)
+                search_beacon = self.beacon_search_results[idx]
+                # Only allow if the beacon is not already reconciled
+                can_reconcile = search_beacon.id not in self.system._reconciled_beacon_ids
+            elif has_candidate:
+                can_reconcile = True
         self.reconcile_btn.config(
-            state=tk.NORMAL if bank and not is_reconciled and has_candidate else tk.DISABLED
+            state=tk.NORMAL if can_reconcile else tk.DISABLED
         )
 
         # Un-reconcile: enabled if bank IS reconciled
@@ -1078,14 +1088,25 @@ class ReconciliationGUI:
     def _on_show_all_changed(self):
         """Toggle showing all vs un-reconciled only."""
         self.show_all_bank = self.show_all_var.get()
-        # Try to stay on the same bank entry
+        # Stay on the same bank entry
         current_bank = self._current_bank()
         self._rebuild_bank_list()
-        if current_bank:
+        if current_bank and self.bank_list:
+            found = False
             for i, b in enumerate(self.bank_list):
                 if b.id == current_bank.id:
                     self.bank_index = i
+                    found = True
                     break
+            if not found:
+                # Entry not in new list (e.g. reconciled entry not in un-reconciled view)
+                # Find nearest by date
+                for i, b in enumerate(self.bank_list):
+                    if b.date >= current_bank.date:
+                        self.bank_index = i
+                        break
+                else:
+                    self.bank_index = len(self.bank_list) - 1
         self._refresh_candidates()
         self._update_display()
 
@@ -1173,10 +1194,32 @@ class ReconciliationGUI:
             self._on_reconcile()
 
     def _on_reconcile(self):
-        """Reconcile current bank entry with current candidate."""
+        """Reconcile current bank entry with current candidate (or search result)."""
         bank = self._current_bank()
+        if not bank:
+            return
+
+        # If beacon search is active, reconcile with the displayed search result
+        if self.beacon_search_active and self.beacon_search_results:
+            idx = min(self.candidate_index, len(self.beacon_search_results) - 1)
+            beacon = self.beacon_search_results[idx]
+            # Use manual match with the beacon's trans_no
+            success, message = self.system.reconcile_manual(bank, [beacon.trans_no])
+            if success:
+                # Clear search and move on
+                self.beacon_search_entry.delete(0, tk.END)
+                self.beacon_search_results = []
+                self.beacon_search_active = False
+                self.beacon_search_result.config(text="")
+                self._rebuild_bank_list()
+                self._refresh_candidates()
+                self._update_display()
+            else:
+                messagebox.showerror("Reconcile Failed", message)
+            return
+
         candidate = self._current_candidate()
-        if not bank or not candidate:
+        if not candidate:
             return
 
         success, message = self.system.reconcile(bank, candidate)
@@ -1264,10 +1307,11 @@ class ReconciliationGUI:
 
         text = self.trans_no_entry.get().strip()
         if not text:
-            messagebox.showerror("Error", "Enter one or more trans_no values (comma-separated)")
+            messagebox.showerror("Error", "Enter one or more trans_no values\n"
+                                 "(comma-separated, or range e.g. 8128-8133)")
             return
 
-        trans_nos = [t.strip() for t in text.split(',') if t.strip()]
+        trans_nos = self._expand_trans_no_input(text)
         success, message = self.system.reconcile_manual(bank, trans_nos)
 
         if success:
@@ -1277,6 +1321,34 @@ class ReconciliationGUI:
             self._update_display()
         else:
             messagebox.showerror("Manual Match Failed", message)
+
+    @staticmethod
+    def _expand_trans_no_input(text: str) -> list:
+        """Expand trans_no input, supporting comma-separated values and numeric ranges.
+
+        Examples:
+            "8128-8133" -> ["8128", "8129", "8130", "8131", "8132", "8133"]
+            "TRN001, TRN002" -> ["TRN001", "TRN002"]
+            "8128-8130, 8135" -> ["8128", "8129", "8130", "8135"]
+        """
+        result = []
+        parts = [p.strip() for p in text.split(',') if p.strip()]
+        for part in parts:
+            if '-' in part:
+                # Try to parse as numeric range
+                pieces = part.split('-', 1)
+                try:
+                    start = int(pieces[0].strip())
+                    end = int(pieces[1].strip())
+                    if start <= end and (end - start) < 1000:  # Sanity limit
+                        result.extend(str(n) for n in range(start, end + 1))
+                    else:
+                        result.append(part)  # Not a valid range, use as-is
+                except ValueError:
+                    result.append(part)  # Not numeric, use as-is (e.g. "TRN-001")
+            else:
+                result.append(part)
+        return result
 
     def _on_mark_resolved(self):
         """Mark current bank entry as manually resolved."""
