@@ -605,10 +605,10 @@ def test_date_range_filter():
     assert filtered_count <= all_count, "Filtered count should be <= all"
     assert filtered_count > 0, "Should still have some entries"
 
-    # Stats should still count ALL entries
+    # Stats should only count entries in range
     stats = system.get_statistics()
-    assert stats['total_bank'] == all_count, "Stats should count all bank entries"
-    print(f"  Stats total_bank: {stats['total_bank']} (all entries counted)")
+    assert stats['total_bank'] == filtered_count, "Stats should only count in-range entries"
+    print(f"  Stats total_bank: {stats['total_bank']} (in-range entries only)")
 
     # Reset
     system.bank_date_from = None

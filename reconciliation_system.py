@@ -88,6 +88,7 @@ class BeaconEntry:
     detail: str
     member_1: str = ""
     member_2: str = ""
+    payment_method: str = ""
     raw_data: Dict = field(default_factory=dict)
     matched: bool = False
 
@@ -174,6 +175,7 @@ class ReconciliationSystem:
     """
 
     DEFAULT_CONFIG = {
+        'title': 'Bank Beacon Reconciliation',
         'bank_file': 'Bank_Transactions.csv',
         'beacon_file': 'Beacon_Entries.csv',
         'common_amounts': ['13.00', '9.50', '6.50'],
@@ -357,6 +359,7 @@ class ReconciliationSystem:
                         detail=row.get('detail', '').strip(),
                         member_1=row.get('member_1', '').strip(),
                         member_2=row.get('member_2', '').strip(),
+                        payment_method=row.get('payment_method', '').strip(),
                         raw_data=dict(row)
                     )
                     entries.append(entry)
@@ -1142,15 +1145,20 @@ class ReconciliationSystem:
     # -------------------------------------------------------------------
 
     def get_statistics(self) -> Dict:
-        """Get reconciliation statistics."""
-        total_bank = len(self.bank_transactions)
+        """Get reconciliation statistics (respects date range filter)."""
+        in_range = [b for b in self.bank_transactions if self.is_bank_in_date_range(b)]
+        in_range_ids = {b.id for b in in_range}
+
+        total_bank = len(in_range)
         total_beacon = len(self.beacon_entries)
 
-        reconciled = [r for r in self.reconciliations if r.status == 'reconciled']
-        resolved = [r for r in self.reconciliations if r.status == 'manually_resolved']
+        reconciled = [r for r in self.reconciliations
+                      if r.status == 'reconciled' and r.bank_id in in_range_ids]
+        resolved = [r for r in self.reconciliations
+                    if r.status == 'manually_resolved' and r.bank_id in in_range_ids]
 
         # Build bank amount lookup
-        bank_by_id = {b.id: b for b in self.bank_transactions}
+        bank_by_id = {b.id: b for b in in_range}
 
         reconciled_amount = sum(
             bank_by_id[r.bank_id].amount
@@ -1161,7 +1169,7 @@ class ReconciliationSystem:
             for r in resolved if r.bank_id in bank_by_id
         )
 
-        unreconciled_bank = [b for b in self.bank_transactions
+        unreconciled_bank = [b for b in in_range
                              if b.id not in self._reconciled_bank_ids]
         unreconciled_amount = sum(b.amount for b in unreconciled_bank)
 
@@ -1234,6 +1242,11 @@ class ReconciliationSystem:
         entries = self.beacon_entries
         if available_only:
             entries = [b for b in entries if b.id not in self._reconciled_beacon_ids]
+
+        # Special keyword: "cheque" filters by payment_method
+        if term == 'cheque':
+            return [b for b in entries
+                    if b.payment_method.lower() == 'cheque']
 
         results = []
         for beacon in entries:
@@ -1382,6 +1395,14 @@ class ReconciliationSystem:
     # Export / Reports
     # -------------------------------------------------------------------
 
+    def _write_report_header(self, writer, report_name: str):
+        """Write standard report header rows: title, report name, date/time."""
+        title = self.config.get('title', 'Bank Beacon Reconciliation')
+        writer.writerow([title])
+        writer.writerow([report_name])
+        writer.writerow([f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"])
+        writer.writerow([])  # Blank separator row
+
     def export_reconciled_csv(self, filepath: str) -> int:
         """Export reconciled transactions to CSV. Returns rows written."""
         bank_by_id = {b.id: b for b in self.bank_transactions}
@@ -1390,6 +1411,7 @@ class ReconciliationSystem:
         rows = 0
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
+            self._write_report_header(writer, "Reconciled Transactions Report")
             writer.writerow([
                 'bank_id', 'bank_date', 'bank_description', 'bank_amount',
                 'beacon_trans_no', 'beacon_date', 'beacon_payee', 'beacon_amount',
@@ -1420,6 +1442,7 @@ class ReconciliationSystem:
         unreconciled = self.get_unreconciled_bank_entries()
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
+            self._write_report_header(writer, "Unreconciled Bank Transactions Report")
             writer.writerow(['bank_id', 'date', 'type', 'description', 'amount'])
             for bank in unreconciled:
                 writer.writerow([
@@ -1434,6 +1457,7 @@ class ReconciliationSystem:
                         if b.id not in self._reconciled_beacon_ids]
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
+            self._write_report_header(writer, "Unreconciled Beacon Entries Report")
             writer.writerow(['trans_no', 'date', 'payee', 'amount', 'member_1', 'detail'])
             for beacon in unreconciled:
                 writer.writerow([
@@ -1450,6 +1474,7 @@ class ReconciliationSystem:
 
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
+            self._write_report_header(writer, "Manually Resolved Transactions Report")
             writer.writerow(['bank_id', 'date', 'type', 'description', 'amount', 'comment'])
             for rec in resolved:
                 bank = bank_by_id.get(rec.bank_id)
@@ -1464,11 +1489,13 @@ class ReconciliationSystem:
 
     def export_stats_summary(self, filepath: str):
         """Export a stats summary report."""
+        title = self.config.get('title', 'Bank Beacon Reconciliation')
         stats = self.get_statistics()
         with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(f"Bank Beacon Reconciliation - Summary Report\n")
+            f.write(f"{title}\n")
+            f.write(f"Summary Report\n")
             f.write(f"Version: {VERSION}\n")
-            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
             f.write(f"Data folder: {self.data_dir}\n")
             f.write(f"{'='*60}\n\n")
             f.write(f"Bank transactions:      {stats['total_bank']}\n")

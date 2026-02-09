@@ -35,7 +35,7 @@ class ReconciliationGUI:
 
     def __init__(self, master: tk.Tk, data_dir: str = None):
         self.master = master
-        self.master.title(f"Bank Beacon Reconciliation v{VERSION}")
+        self.master.title(f"Bank Beacon Reconciliation v{VERSION}")  # Updated after system loads
         self.master.geometry("1300x750")
         self.master.minsize(1000, 650)
 
@@ -52,6 +52,10 @@ class ReconciliationGUI:
         # Initialize reconciliation system
         self.system = ReconciliationSystem(data_dir=data_dir, code_dir=code_dir)
         self.system.load_data()
+
+        # Update window title with config title
+        title = self.system.config.get('title', 'Bank Beacon Reconciliation')
+        self.master.title(f"{title} v{VERSION}")
 
         bank_count = len(self.system.bank_transactions)
         beacon_count = len(self.system.beacon_entries)
@@ -366,12 +370,13 @@ class ReconciliationGUI:
                                            command=self._on_candidate_prev, style='Nav.TButton')
         self.beacon_prev_btn.pack(side=tk.LEFT, padx=(0, 5))
 
+        self.beacon_nav_label = tk.Label(nav_row, text="0 / 0",
+                                          font=('Segoe UI', 10), fg='gray')
+        self.beacon_nav_label.pack(side=tk.LEFT, padx=(0, 5))
+
         self.beacon_next_btn = ttk.Button(nav_row, text="Next Candidate >",
                                            command=self._on_candidate_next, style='Nav.TButton')
         self.beacon_next_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-        self.beacon_nav_label = ttk.Label(nav_row, text="0 / 0", style='Small.TLabel')
-        self.beacon_nav_label.pack(side=tk.RIGHT)
 
         # Confidence / type indicator
         score_row = ttk.Frame(beacon_outer)
@@ -431,7 +436,7 @@ class ReconciliationGUI:
                                                style='Small.TLabel')
         self.beacon_search_result.pack(side=tk.LEFT, padx=5)
         # Search format hint
-        ttk.Label(beacon_search_area, text='[surname | "exact name" | £12.50 | 17/03/25 | 7656 (trans no) | BEACON_001]',
+        ttk.Label(beacon_search_area, text='[surname | "exact name" | £12.50 | 17/03/25 | 7656 (trans no) | cheque | BEACON_001]',
                   foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     def _create_beacon_entry_widgets(self, frame):
@@ -906,7 +911,8 @@ class ReconciliationGUI:
                         self.beacon_total_label.config(text=f"{chr(163)}{total}")
                         self.total_frame.pack(fill=tk.X, pady=(5, 0))
             # Nav info
-            self.beacon_nav_label.config(text="Reconciled")
+            self.beacon_nav_label.config(text="Reconciled", fg='gray',
+                                          font=('Segoe UI', 10))
             self.confidence_label.config(text="")
             self.match_type_label.config(text="")
             self.score_breakdown_label.config(text="")
@@ -921,7 +927,8 @@ class ReconciliationGUI:
                      "Use manual trans_no match\nor mark as resolved"
             )
             self.no_candidates_label.pack(fill=tk.BOTH, expand=True, pady=20)
-            self.beacon_nav_label.config(text="0 / 0")
+            self.beacon_nav_label.config(text="0 / 0", fg='gray',
+                                          font=('Segoe UI', 10))
             self.confidence_label.config(text="")
             self.match_type_label.config(text="")
             self.score_breakdown_label.config(text="")
@@ -934,10 +941,14 @@ class ReconciliationGUI:
         if not candidate:
             return
 
-        # Navigation - highlight in red when multiple candidates
+        # Navigation - highlight in red+bold when multiple candidates
         nav_text = f"{self.candidate_index + 1} / {len(self.candidates)}"
-        nav_color = '#CC0000' if len(self.candidates) > 1 else 'gray'
-        self.beacon_nav_label.config(text=nav_text, foreground=nav_color)
+        if len(self.candidates) > 1:
+            self.beacon_nav_label.config(text=nav_text, fg='#CC0000',
+                                          font=('Segoe UI', 10, 'bold'))
+        else:
+            self.beacon_nav_label.config(text=nav_text, fg='gray',
+                                          font=('Segoe UI', 10))
         self.beacon_prev_btn.config(
             state=tk.NORMAL if self.candidate_index > 0 else tk.DISABLED
         )
@@ -990,7 +1001,8 @@ class ReconciliationGUI:
         beacon = self.beacon_search_results[idx]
 
         self.beacon_nav_label.config(
-            text=f"Search {idx + 1} / {len(self.beacon_search_results)}"
+            text=f"Search {idx + 1} / {len(self.beacon_search_results)}",
+            fg='gray', font=('Segoe UI', 10)
         )
         self.beacon_prev_btn.config(state=tk.NORMAL if idx > 0 else tk.DISABLED)
         self.beacon_next_btn.config(
@@ -1001,18 +1013,19 @@ class ReconciliationGUI:
         bank_id = self.system.get_bank_id_for_beacon(beacon.id)
         if bank_id:
             self.confidence_label.config(
-                text=f"RECONCILED with {bank_id}", foreground='#006600'
+                text=f"RECONCILED with {bank_id}  [click to go]",
+                foreground='#006600', cursor='hand2'
             )
-            self.match_type_label.config(text="(double-click to navigate)")
-            self.score_breakdown_label.config(text="")
-            # Bind double-click on beacon1_frame to navigate to reconciled pair
-            self.beacon1_frame.bind('<Double-1>',
-                                     lambda e: self._navigate_to_bank(bank_id))
-        else:
-            self.confidence_label.config(text="Search result", foreground='')
+            self.confidence_label.bind('<Button-1>',
+                                        lambda e, bid=bank_id: self._navigate_to_bank(bid))
             self.match_type_label.config(text="")
             self.score_breakdown_label.config(text="")
-            self.beacon1_frame.unbind('<Double-1>')
+        else:
+            self.confidence_label.config(text="Search result", foreground='',
+                                          cursor='')
+            self.confidence_label.unbind('<Button-1>')
+            self.match_type_label.config(text="")
+            self.score_breakdown_label.config(text="")
 
         self._populate_beacon_widgets(self.beacon1_widgets, beacon)
         self.beacon1_frame.pack(fill=tk.X, pady=(0, 5))
