@@ -335,6 +335,7 @@ class ReconciliationGUI:
         self.reconciled_comment_label = ttk.Label(self.reconciled_info_frame, text="",
                                                    foreground='#666666', wraplength=400)
         self.reconciled_comment_label.pack(fill=tk.X)
+        self.reconciled_comment_label.bind('<Button-1>', self._on_edit_resolved_comment)
 
         # Bank search
         search_frame = ttk.Frame(bank_outer)
@@ -854,8 +855,9 @@ class ReconciliationGUI:
                 # Show comment
                 self.reconciled_info_frame.pack(fill=tk.X, pady=(8, 0))
                 self.reconciled_info_label.config(text="No beacon entries (resolved)")
+                comment_text = f"Comment: {rec.comment}  [click to edit]" if rec.comment else "[click to add comment]"
                 self.reconciled_comment_label.config(
-                    text=f"Comment: {rec.comment}" if rec.comment else ""
+                    text=comment_text, cursor='hand2'
                 )
             else:
                 self.bank_status_label.config(text="RECONCILED")
@@ -1358,20 +1360,31 @@ class ReconciliationGUI:
         return result
 
     def _on_mark_resolved(self):
-        """Mark current bank entry as manually resolved."""
+        """Mark current bank entry as manually resolved, or update resolved comment."""
         bank = self._current_bank()
         if not bank:
             messagebox.showerror("Error", "No bank entry selected")
             return
 
-        if self.system.is_bank_reconciled(bank.id):
-            messagebox.showerror("Error", "Bank entry is already reconciled.\n"
-                                 "Un-reconcile first if you want to change it.")
-            return
-
         comment = self.resolved_entry.get().strip()
         if not comment:
             messagebox.showerror("Error", "Please enter a comment explaining the resolution")
+            return
+
+        # Check if already resolved - if so, update the comment
+        rec = self.system.get_reconciliation_for_bank(bank.id)
+        if rec and rec.status == 'manually_resolved':
+            success, message = self.system.update_resolved_comment(bank.id, comment)
+            if success:
+                self.resolved_entry.delete(0, tk.END)
+                self._update_display()
+            else:
+                messagebox.showerror("Update Comment Failed", message)
+            return
+
+        if self.system.is_bank_reconciled(bank.id):
+            messagebox.showerror("Error", "Bank entry is already reconciled.\n"
+                                 "Un-reconcile first if you want to change it.")
             return
 
         success, message = self.system.mark_resolved(bank, comment)
@@ -1383,6 +1396,17 @@ class ReconciliationGUI:
             self._update_display()
         else:
             messagebox.showerror("Mark Resolved Failed", message)
+
+    def _on_edit_resolved_comment(self, event=None):
+        """Populate resolved entry with existing comment for editing."""
+        bank = self._current_bank()
+        if not bank:
+            return
+        rec = self.system.get_reconciliation_for_bank(bank.id)
+        if rec and rec.status == 'manually_resolved' and rec.comment:
+            self.resolved_entry.delete(0, tk.END)
+            self.resolved_entry.insert(0, rec.comment)
+            self.resolved_entry.focus_set()
 
     def _on_config_changed(self):
         """Handle date tolerance or trans_no limit change."""
@@ -1481,8 +1505,9 @@ class ReconciliationGUI:
     def _on_cheque_filter_changed(self):
         """Handle cheque filter toggle."""
         if self.cheque_filter_var.get():
-            # Cheque toggle ON: show all cheque beacons (always include reconciled)
-            results = self.system.get_cheque_beacon_entries(available_only=False)
+            # Cheque toggle ON: respect "All beacons" checkbox
+            bypass = self.beacon_bypass_var.get()
+            results = self.system.get_cheque_beacon_entries(available_only=not bypass)
             if not results:
                 self.beacon_search_result.config(text="No cheques", foreground='#CC0000')
                 self.beacon_search_results = []
@@ -1499,18 +1524,22 @@ class ReconciliationGUI:
                 text=f"Found {len(results)} cheques", foreground='gray'
             )
         else:
-            # Cheque toggle OFF: clear and return to candidates
-            self._on_beacon_search_clear()
+            # Cheque toggle OFF: return to candidates (don't clear search box)
+            self._cancel_beacon_search()
 
-    def _on_beacon_search_clear(self):
-        """Clear beacon search and return to candidates view."""
-        self.beacon_search_entry.delete(0, tk.END)
+    def _cancel_beacon_search(self):
+        """Cancel active beacon search without clearing the search box."""
         self.cheque_filter_var.set(False)
         self.beacon_search_results = []
         self.beacon_search_active = False
         self.beacon_search_result.config(text="")
         self._refresh_candidates()
         self._update_display()
+
+    def _on_beacon_search_clear(self):
+        """Clear beacon search and return to candidates view."""
+        self.beacon_search_entry.delete(0, tk.END)
+        self._cancel_beacon_search()
 
     # -------------------------------------------------------------------
     # Consistency check

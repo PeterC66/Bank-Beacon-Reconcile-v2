@@ -303,6 +303,13 @@ def test_mark_resolved():
     assert rec.beacon_ids == []
     print(f"  Resolved: {bank.description[:30]} with comment")
 
+    # Test editing the resolved comment
+    success, msg = system.update_resolved_comment(bank.id, "Updated comment")
+    assert success, f"Update comment failed: {msg}"
+    rec = system.get_reconciliation_for_bank(bank.id)
+    assert rec.comment == "Updated comment"
+    print(f"  Updated resolved comment: '{rec.comment}'")
+
     print("PASSED")
 
 

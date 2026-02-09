@@ -1077,6 +1077,17 @@ class ReconciliationSystem:
         self.save_state()
         return True, "Marked as manually resolved"
 
+    def update_resolved_comment(self, bank_id: str, new_comment: str) -> Tuple[bool, str]:
+        """Update the comment on a manually resolved bank entry."""
+        rec = self._reconciled_bank_ids.get(bank_id)
+        if rec is None:
+            return False, f"Bank entry {bank_id} is not reconciled"
+        if rec.status != 'manually_resolved':
+            return False, f"Bank entry {bank_id} is not manually resolved"
+        rec.comment = new_comment
+        self.save_state()
+        return True, "Comment updated"
+
     def unreconcile(self, bank_id: str) -> Tuple[bool, str]:
         """Undo a reconciliation.
 
