@@ -341,7 +341,7 @@ class ReconciliationGUI:
                                              style='Small.TLabel')
         self.bank_search_result.pack(side=tk.LEFT, padx=5)
         # Search format hint
-        ttk.Label(bank_outer, text='[name | "exact" | £amount | date | BANK_id]',
+        ttk.Label(bank_outer, text='[surname | "exact name" | £12.50 | 17/03/25 | BANK_001]',
                   foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     # -------------------------------------------------------------------
@@ -426,7 +426,7 @@ class ReconciliationGUI:
                                                style='Small.TLabel')
         self.beacon_search_result.pack(side=tk.LEFT, padx=5)
         # Search format hint
-        ttk.Label(beacon_search_area, text='[name | "exact" | £amount | date | trans_no | BEACON_id]',
+        ttk.Label(beacon_search_area, text='[surname | "exact name" | £12.50 | 17/03/25 | 7656 (trans no) | BEACON_001]',
                   foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     def _create_beacon_entry_widgets(self, frame):
@@ -558,7 +558,16 @@ class ReconciliationGUI:
             member_names = self._get_member_names_from_bank(bank)
             if member_names:
                 source_label = " (from bank description)"
-        elif not self.beacon_search_active:
+        elif self.beacon_search_active:
+            # Beacon search active - use member from displayed search result
+            if (self.beacon_search_results and
+                    0 <= self.candidate_index < len(self.beacon_search_results)):
+                beacon = self.beacon_search_results[self.candidate_index]
+                if beacon.member_1 and beacon.member_1 not in member_names:
+                    member_names.append(beacon.member_1)
+                if beacon.member_2 and beacon.member_2 not in member_names:
+                    member_names.append(beacon.member_2)
+        else:
             # Not reconciled - use current candidate's member_1
             candidate = self._current_candidate()
             if candidate:
@@ -625,11 +634,11 @@ class ReconciliationGUI:
         return names
 
     def _get_readable_member_name(self, member_code: str) -> str:
-        """Try to find a readable name for a member code like 'SmithJ'."""
+        """Try to find a readable name and number for a member code like 'SmithJ'."""
         for mem_no, info in self.system.member_lookup.items():
             full = info['forename'] + info['surname']
             if full.replace(' ', '').upper() == member_code.replace(' ', '').upper():
-                return f"{info['forename']} {info['surname']}"
+                return f"{info['forename']} {info['surname']} (#{mem_no})"
         return ""
 
     def _on_member_tree_click(self, event):
@@ -1059,12 +1068,14 @@ class ReconciliationGUI:
                 self.candidate_index -= 1
                 self._update_beacon_panel()
                 self._update_action_states()
+                self._update_member_panel()
             return
 
         if self.candidate_index > 0:
             self.candidate_index -= 1
             self._update_beacon_panel()
             self._update_action_states()
+            self._update_member_panel()
 
     def _on_candidate_next(self):
         """Navigate to next beacon candidate."""
@@ -1073,12 +1084,14 @@ class ReconciliationGUI:
                 self.candidate_index += 1
                 self._update_beacon_panel()
                 self._update_action_states()
+                self._update_member_panel()
             return
 
         if self.candidate_index < len(self.candidates) - 1:
             self.candidate_index += 1
             self._update_beacon_panel()
             self._update_action_states()
+            self._update_member_panel()
 
     # -------------------------------------------------------------------
     # Actions
@@ -1306,6 +1319,7 @@ class ReconciliationGUI:
         self.candidate_index = 0
         self._update_beacon_panel()
         self._update_action_states()
+        self._update_member_panel()
         self.beacon_search_result.config(
             text=f"Found {len(results)}", foreground='gray'
         )
