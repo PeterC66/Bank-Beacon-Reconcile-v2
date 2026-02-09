@@ -181,6 +181,10 @@ class ReconciliationSystem:
         'trans_no_limit': 5,
         'auto_reconcile_common_threshold': 0.90,
         'auto_reconcile_other_threshold': 0.80,
+        'allow_1_to_2': True,
+        'match_beacon_detail': True,
+        'bank_date_from': None,
+        'bank_date_to': None,
     }
 
     def __init__(self, data_dir: str = None, code_dir: str = None):
@@ -233,6 +237,23 @@ class ReconciliationSystem:
         self.trans_no_limit: int = self.config['trans_no_limit']
         self.auto_reconcile_common_threshold: float = self.config['auto_reconcile_common_threshold']
         self.auto_reconcile_other_threshold: float = self.config['auto_reconcile_other_threshold']
+        self.allow_1_to_2: bool = self.config['allow_1_to_2']
+        self.match_beacon_detail: bool = self.config['match_beacon_detail']
+
+        # Date range filter for bank entries
+        self.bank_date_from: Optional[datetime] = None
+        self.bank_date_to: Optional[datetime] = None
+        if self.config.get('bank_date_from'):
+            try:
+                self.bank_date_from = datetime.strptime(self.config['bank_date_from'], '%d/%m/%Y')
+            except ValueError:
+                print(f"Warning: Could not parse bank_date_from: {self.config['bank_date_from']}")
+        if self.config.get('bank_date_to'):
+            try:
+                self.bank_date_to = datetime.strptime(self.config['bank_date_to'], '%d/%m/%Y')
+            except ValueError:
+                print(f"Warning: Could not parse bank_date_to: {self.config['bank_date_to']}")
+
 
         # Index for fast lookups
         self._beacon_by_amount: Dict[Decimal, List[BeaconEntry]] = {}
@@ -437,14 +458,23 @@ class ReconciliationSystem:
     # Bank entry navigation
     # -------------------------------------------------------------------
 
+    def is_bank_in_date_range(self, bank: BankTransaction) -> bool:
+        """Check if a bank entry falls within the configured date range."""
+        if self.bank_date_from and bank.date < self.bank_date_from:
+            return False
+        if self.bank_date_to and bank.date > self.bank_date_to:
+            return False
+        return True
+
     def get_bank_entries_sorted(self) -> List[BankTransaction]:
-        """Get all bank entries sorted by date."""
-        return self.bank_transactions  # Already sorted on load
+        """Get all bank entries sorted by date (filtered by date range if configured)."""
+        return [b for b in self.bank_transactions if self.is_bank_in_date_range(b)]
 
     def get_unreconciled_bank_entries(self) -> List[BankTransaction]:
-        """Get unreconciled bank entries sorted by date."""
+        """Get unreconciled bank entries sorted by date (filtered by date range)."""
         return [b for b in self.bank_transactions
-                if b.id not in self._reconciled_bank_ids]
+                if b.id not in self._reconciled_bank_ids
+                and self.is_bank_in_date_range(b)]
 
     def is_bank_reconciled(self, bank_id: str) -> bool:
         """Check if a bank entry is reconciled."""
@@ -478,8 +508,10 @@ class ReconciliationSystem:
         # Generate 1-to-1 candidates
         candidates_1to1 = self._find_1to1_candidates(bank_txn, available)
 
-        # Generate 1-to-2 candidates
-        candidates_1to2 = self._find_1to2_candidates(bank_txn, available)
+        # Generate 1-to-2 candidates (if allowed)
+        candidates_1to2 = []
+        if self.allow_1_to_2:
+            candidates_1to2 = self._find_1to2_candidates(bank_txn, available)
 
         # Combine all candidates
         all_candidates = candidates_1to1 + candidates_1to2
@@ -525,6 +557,9 @@ class ReconciliationSystem:
                 continue
 
             name_score = self._calculate_name_score(bank_txn.description, beacon.payee)
+            if self.match_beacon_detail and beacon.detail:
+                detail_score = self._calculate_name_score(bank_txn.description, beacon.detail)
+                name_score = max(name_score, detail_score)
             amount_score = self._calculate_amount_score(bank_txn.amount)
 
             # Skip if name is 0% and amount is common
@@ -630,7 +665,13 @@ class ReconciliationSystem:
             )
 
         name_score1 = self._calculate_name_score(bank_txn.description, beacon1.payee)
+        if self.match_beacon_detail and beacon1.detail:
+            detail_score1 = self._calculate_name_score(bank_txn.description, beacon1.detail)
+            name_score1 = max(name_score1, detail_score1)
         name_score2 = self._calculate_name_score(bank_txn.description, beacon2.payee)
+        if self.match_beacon_detail and beacon2.detail:
+            detail_score2 = self._calculate_name_score(bank_txn.description, beacon2.detail)
+            name_score2 = max(name_score2, detail_score2)
         name_score = (name_score1 + name_score2) / 2
 
         is_common1 = beacon1.amount in self.common_amounts
@@ -1211,10 +1252,10 @@ class ReconciliationSystem:
         return results
 
     def _is_amount_match(self, term: str, amount: Decimal) -> bool:
-        """Check if search term matches an amount."""
+        """Check if search term matches an amount (ignores sign)."""
         try:
             search_amount = Decimal(term.lstrip('£').strip())
-            return amount == search_amount
+            return abs(amount) == abs(search_amount)
         except Exception:
             return False
 

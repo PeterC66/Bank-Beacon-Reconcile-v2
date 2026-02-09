@@ -535,6 +535,88 @@ def test_member_beacon_lookup():
     print("PASSED")
 
 
+def test_allow_1_to_2_config():
+    """Test that allow_1_to_2=False disables 1-to-2 candidate generation."""
+    print("\n=== Test: Allow 1-to-2 Config ===")
+
+    system = make_system()
+
+    # Find a bank entry that has 1-to-2 candidates
+    bank_with_1to2 = None
+    for bank in system.bank_transactions:
+        candidates = system.get_candidates_for_bank(bank)
+        if any(c.match_type == '1-to-2' for c in candidates):
+            bank_with_1to2 = bank
+            break
+
+    if bank_with_1to2:
+        # Disable 1-to-2
+        system.allow_1_to_2 = False
+        candidates = system.get_candidates_for_bank(bank_with_1to2)
+        has_1to2 = any(c.match_type == '1-to-2' for c in candidates)
+        assert not has_1to2, "Should have no 1-to-2 candidates when disabled"
+        print(f"  {bank_with_1to2.id}: no 1-to-2 candidates when disabled (correct)")
+
+        # Re-enable
+        system.allow_1_to_2 = True
+        candidates = system.get_candidates_for_bank(bank_with_1to2)
+        has_1to2 = any(c.match_type == '1-to-2' for c in candidates)
+        assert has_1to2, "Should have 1-to-2 candidates when enabled"
+        print(f"  {bank_with_1to2.id}: has 1-to-2 candidates when enabled (correct)")
+    else:
+        print("  SKIPPED (no 1-to-2 candidates in sample data)")
+
+    print("PASSED")
+
+
+def test_amount_search_ignores_sign():
+    """Test that amount search ignores sign."""
+    print("\n=== Test: Amount Search Ignores Sign ===")
+
+    system = make_system()
+
+    # Search with positive amount
+    results_pos = system.search_bank_entries("£13.00")
+    # Search with negative amount (should find same results)
+    results_neg = system.search_bank_entries("£-13.00")
+    print(f"  Bank search '£13.00': {len(results_pos)} results")
+    print(f"  Bank search '£-13.00': {len(results_neg)} results")
+    assert len(results_pos) == len(results_neg), "Sign should not affect search results"
+
+    print("PASSED")
+
+
+def test_date_range_filter():
+    """Test that bank_date_from/to filters bank entries in navigation."""
+    print("\n=== Test: Date Range Filter ===")
+
+    system = make_system()
+    all_count = len(system.get_bank_entries_sorted())
+    print(f"  All entries (no filter): {all_count}")
+
+    # Set a narrow date range that excludes some entries
+    from datetime import datetime
+    dates = [b.date for b in system.bank_transactions]
+    mid_date = sorted(dates)[len(dates) // 2]
+    system.bank_date_from = mid_date
+    system.bank_date_to = None
+    filtered_count = len(system.get_bank_entries_sorted())
+    print(f"  Filtered from {mid_date.strftime('%d/%m/%Y')}: {filtered_count}")
+    assert filtered_count <= all_count, "Filtered count should be <= all"
+    assert filtered_count > 0, "Should still have some entries"
+
+    # Stats should still count ALL entries
+    stats = system.get_statistics()
+    assert stats['total_bank'] == all_count, "Stats should count all bank entries"
+    print(f"  Stats total_bank: {stats['total_bank']} (all entries counted)")
+
+    # Reset
+    system.bank_date_from = None
+    assert len(system.get_bank_entries_sorted()) == all_count
+
+    print("PASSED")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -566,6 +648,9 @@ def run_all_tests():
     test_candidate_ordering()
     test_consistency_check()
     test_member_beacon_lookup()
+    test_allow_1_to_2_config()
+    test_amount_search_ignores_sign()
+    test_date_range_filter()
 
     # Final cleanup
     if os.path.exists(state_file):

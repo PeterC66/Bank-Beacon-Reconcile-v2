@@ -94,6 +94,9 @@ class ReconciliationGUI:
         self._create_widgets()
         self._update_display()
 
+        # Bind Enter key for quick reconcile
+        self.master.bind('<Return>', self._on_enter_key)
+
         # Show startup summary
         if bank_count > 0 and beacon_count > 0:
             stats = self.system.get_statistics()
@@ -282,41 +285,43 @@ class ReconciliationGUI:
                                               style='Small.TLabel', foreground='gray')
         self.bank_rec_type_label.pack(side=tk.RIGHT, padx=5, pady=2)
 
-        # Details grid
+        # Details grid - right-justified so values are closer to beacon panel
         details = ttk.Frame(bank_outer)
         details.pack(fill=tk.BOTH, expand=True)
+        details.columnconfigure(0, weight=1)  # Push content right
 
         row = 0
-        ttk.Label(details, text="Bank ID:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        ttk.Label(details, text="Bank ID:", style='Header.TLabel').grid(row=row, column=1, sticky='e', pady=3)
         self.bank_id_label = ttk.Label(details, text="", foreground='gray')
-        self.bank_id_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+        self.bank_id_label.grid(row=row, column=2, sticky='e', padx=(10, 0), pady=3)
 
         row += 1
-        ttk.Label(details, text="Date:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        ttk.Label(details, text="Date:", style='Header.TLabel').grid(row=row, column=1, sticky='e', pady=3)
         self.bank_date_label = ttk.Label(details, text="")
-        self.bank_date_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+        self.bank_date_label.grid(row=row, column=2, sticky='e', padx=(10, 0), pady=3)
 
         row += 1
-        ttk.Label(details, text="Type:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        ttk.Label(details, text="Type:", style='Header.TLabel').grid(row=row, column=1, sticky='e', pady=3)
         self.bank_type_label = ttk.Label(details, text="")
-        self.bank_type_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+        self.bank_type_label.grid(row=row, column=2, sticky='e', padx=(10, 0), pady=3)
 
         row += 1
-        ttk.Label(details, text="Description:", style='Header.TLabel').grid(row=row, column=0, sticky='nw', pady=3)
-        self.bank_desc_label = ttk.Label(details, text="", wraplength=350, style='Value.TLabel')
-        self.bank_desc_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+        ttk.Label(details, text="Description:", style='Header.TLabel').grid(row=row, column=1, sticky='ne', pady=3)
+        self.bank_desc_label = ttk.Label(details, text="", wraplength=350, style='Value.TLabel',
+                                          justify=tk.RIGHT)
+        self.bank_desc_label.grid(row=row, column=2, sticky='e', padx=(10, 0), pady=3)
 
         row += 1
-        ttk.Label(details, text="Member:", style='Header.TLabel').grid(row=row, column=0, sticky='nw', pady=3)
+        ttk.Label(details, text="Member:", style='Header.TLabel').grid(row=row, column=1, sticky='ne', pady=3)
         self.member_lookup_label = ttk.Label(details, text="", wraplength=350,
-                                              foreground='#006600', justify=tk.LEFT)
-        self.member_lookup_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+                                              foreground='#006600', justify=tk.RIGHT)
+        self.member_lookup_label.grid(row=row, column=2, sticky='e', padx=(10, 0), pady=3)
 
         row += 1
-        ttk.Label(details, text="Amount:", style='Header.TLabel').grid(row=row, column=0, sticky='w', pady=3)
+        ttk.Label(details, text="Amount:", style='Header.TLabel').grid(row=row, column=1, sticky='e', pady=3)
         self.bank_amount_label = ttk.Label(details, text="", style='Amount.TLabel',
                                             foreground='#0066CC')
-        self.bank_amount_label.grid(row=row, column=1, sticky='w', padx=10, pady=3)
+        self.bank_amount_label.grid(row=row, column=2, sticky='e', padx=(10, 0), pady=3)
 
         # Reconciled beacon info (shown when bank is reconciled)
         self.reconciled_info_frame = ttk.LabelFrame(bank_outer, text="Reconciled With", padding="5")
@@ -929,10 +934,10 @@ class ReconciliationGUI:
         if not candidate:
             return
 
-        # Navigation
-        self.beacon_nav_label.config(
-            text=f"{self.candidate_index + 1} / {len(self.candidates)}"
-        )
+        # Navigation - highlight in red when multiple candidates
+        nav_text = f"{self.candidate_index + 1} / {len(self.candidates)}"
+        nav_color = '#CC0000' if len(self.candidates) > 1 else 'gray'
+        self.beacon_nav_label.config(text=nav_text, foreground=nav_color)
         self.beacon_prev_btn.config(
             state=tk.NORMAL if self.candidate_index > 0 else tk.DISABLED
         )
@@ -991,9 +996,23 @@ class ReconciliationGUI:
         self.beacon_next_btn.config(
             state=tk.NORMAL if idx < len(self.beacon_search_results) - 1 else tk.DISABLED
         )
-        self.confidence_label.config(text="Search result")
-        self.match_type_label.config(text="")
-        self.score_breakdown_label.config(text="")
+
+        # Check if this beacon is reconciled
+        bank_id = self.system.get_bank_id_for_beacon(beacon.id)
+        if bank_id:
+            self.confidence_label.config(
+                text=f"RECONCILED with {bank_id}", foreground='#006600'
+            )
+            self.match_type_label.config(text="(double-click to navigate)")
+            self.score_breakdown_label.config(text="")
+            # Bind double-click on beacon1_frame to navigate to reconciled pair
+            self.beacon1_frame.bind('<Double-1>',
+                                     lambda e: self._navigate_to_bank(bank_id))
+        else:
+            self.confidence_label.config(text="Search result", foreground='')
+            self.match_type_label.config(text="")
+            self.score_breakdown_label.config(text="")
+            self.beacon1_frame.unbind('<Double-1>')
 
         self._populate_beacon_widgets(self.beacon1_widgets, beacon)
         self.beacon1_frame.pack(fill=tk.X, pady=(0, 5))
@@ -1096,6 +1115,49 @@ class ReconciliationGUI:
     # -------------------------------------------------------------------
     # Actions
     # -------------------------------------------------------------------
+
+    def _navigate_to_bank(self, bank_id: str):
+        """Navigate to a specific bank entry by ID. Used for search result navigation."""
+        # Clear beacon search
+        self.beacon_search_entry.delete(0, tk.END)
+        self.beacon_search_results = []
+        self.beacon_search_active = False
+        self.beacon_search_result.config(text="")
+
+        # Ensure show-all is on so reconciled entries are visible
+        if not self.show_all_bank:
+            self.show_all_var.set(True)
+            self._on_show_all_changed()
+
+        for i, bank in enumerate(self.bank_list):
+            if bank.id == bank_id:
+                self.bank_index = i
+                self._refresh_candidates()
+                self._update_display()
+                break
+
+    def _on_enter_key(self, event=None):
+        """Handle Enter key: reconcile if exactly 1 non-rejected candidate, else do nothing.
+
+        Do nothing if: focus is in an Entry widget, bank is reconciled,
+        search is active, or there isn't exactly 1 candidate.
+        """
+        # Don't intercept Enter when typing in an Entry or Spinbox
+        focus = self.master.focus_get()
+        if isinstance(focus, (ttk.Entry, tk.Entry, ttk.Spinbox)):
+            return
+
+        bank = self._current_bank()
+        if not bank:
+            return
+        if self.system.is_bank_reconciled(bank.id):
+            return
+        if self.beacon_search_active:
+            return
+
+        non_rejected = [c for c in self.candidates if not c.is_rejected]
+        if len(non_rejected) == 1:
+            self._on_reconcile()
 
     def _on_reconcile(self):
         """Reconcile current bank entry with current candidate."""

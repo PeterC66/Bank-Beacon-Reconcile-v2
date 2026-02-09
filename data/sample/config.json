@@ -5,5 +5,7 @@
   "date_tolerance_days": 7,
   "trans_no_limit": 5,
   "auto_reconcile_common_threshold": 0.90,
-  "auto_reconcile_other_threshold": 0.80
+  "auto_reconcile_other_threshold": 0.80,
+  "allow_1_to_2": true,
+  "match_beacon_detail": true
 }
