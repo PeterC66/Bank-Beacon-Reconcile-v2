@@ -431,12 +431,16 @@ class ReconciliationGUI:
         self.beacon_bypass_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(search_frame, text="All beacons",
                          variable=self.beacon_bypass_var).pack(side=tk.LEFT, padx=3)
+        self.cheque_filter_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(search_frame, text="Cheque",
+                         variable=self.cheque_filter_var,
+                         command=self._on_cheque_filter_changed).pack(side=tk.LEFT, padx=3)
         ttk.Button(search_frame, text="Clear", command=self._on_beacon_search_clear).pack(side=tk.LEFT, padx=1)
         self.beacon_search_result = ttk.Label(search_frame, text="", foreground='gray',
                                                style='Small.TLabel')
         self.beacon_search_result.pack(side=tk.LEFT, padx=5)
         # Search format hint
-        ttk.Label(beacon_search_area, text='[surname | "exact name" | £12.50 | 17/03/25 | 7656 (trans no) | cheque | BEACON_001]',
+        ttk.Label(beacon_search_area, text='[surname | "exact name" | £12.50 | 17/03/25 | 7656 (trans no) | BEACON_001]',
                   foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     def _create_beacon_entry_widgets(self, frame):
@@ -984,7 +988,10 @@ class ReconciliationGUI:
 
     def _populate_beacon_widgets(self, widgets, beacon: BeaconEntry):
         """Fill a set of beacon widgets with data from a BeaconEntry."""
-        widgets['trans_no'].config(text=beacon.trans_no)
+        trans_text = beacon.trans_no
+        if beacon.payment_method.lower() == 'cheque':
+            trans_text += "  (CHQ)"
+        widgets['trans_no'].config(text=trans_text)
         widgets['date'].config(text=beacon.date.strftime('%d/%m/%Y'))
         widgets['payee'].config(text=beacon.payee)
         widgets['detail'].config(text=beacon.detail)
@@ -1471,9 +1478,34 @@ class ReconciliationGUI:
             text=f"Found {len(results)}", foreground='gray'
         )
 
+    def _on_cheque_filter_changed(self):
+        """Handle cheque filter toggle."""
+        if self.cheque_filter_var.get():
+            # Cheque toggle ON: show all cheque beacons (always include reconciled)
+            results = self.system.get_cheque_beacon_entries(available_only=False)
+            if not results:
+                self.beacon_search_result.config(text="No cheques", foreground='#CC0000')
+                self.beacon_search_results = []
+                self.beacon_search_active = False
+                self.cheque_filter_var.set(False)
+                return
+            self.beacon_search_results = results
+            self.beacon_search_active = True
+            self.candidate_index = 0
+            self._update_beacon_panel()
+            self._update_action_states()
+            self._update_member_panel()
+            self.beacon_search_result.config(
+                text=f"Found {len(results)} cheques", foreground='gray'
+            )
+        else:
+            # Cheque toggle OFF: clear and return to candidates
+            self._on_beacon_search_clear()
+
     def _on_beacon_search_clear(self):
         """Clear beacon search and return to candidates view."""
         self.beacon_search_entry.delete(0, tk.END)
+        self.cheque_filter_var.set(False)
         self.beacon_search_results = []
         self.beacon_search_active = False
         self.beacon_search_result.config(text="")

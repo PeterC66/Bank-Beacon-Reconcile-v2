@@ -617,6 +617,53 @@ def test_date_range_filter():
     print("PASSED")
 
 
+def test_cheque_matching():
+    """Test cheque indicator, cheque filter, and cheque scoring bonus."""
+    print("\n=== Test: Cheque Matching ===")
+
+    system = make_system()
+
+    # Test get_cheque_beacon_entries returns only cheque beacons
+    cheque_beacons = system.get_cheque_beacon_entries()
+    cheque_count = sum(1 for b in system.beacon_entries
+                       if b.payment_method.lower() == 'cheque')
+    assert len(cheque_beacons) == cheque_count, \
+        f"Expected {cheque_count} cheque beacons, got {len(cheque_beacons)}"
+    print(f"  Cheque beacons: {len(cheque_beacons)} out of {len(system.beacon_entries)}")
+
+    # Test cheque bonus calculation
+    from datetime import datetime
+    beacon_cheque = BeaconEntry(
+        id="TEST_CHQ", date=datetime(2025, 1, 15),
+        trans_no="9999", payee="Test Payee", detail="",
+        amount=Decimal("50.00"), payment_method="Cheque"
+    )
+    beacon_normal = BeaconEntry(
+        id="TEST_NORM", date=datetime(2025, 1, 15),
+        trans_no="9998", payee="Test Payee", detail="",
+        amount=Decimal("50.00"), payment_method=""
+    )
+    # Bank description with "cheque" should give bonus for cheque beacon
+    bonus = system._calculate_cheque_bonus("CHQ Payment 123", beacon_cheque)
+    assert bonus > 0, "Should get cheque bonus when bank has CHQ and beacon is cheque"
+    print(f"  Cheque bonus for CHQ in desc + cheque beacon: {bonus}")
+
+    bonus_none = system._calculate_cheque_bonus("CHQ Payment 123", beacon_normal)
+    assert bonus_none == 0, "Should NOT get cheque bonus when beacon is not cheque"
+    print(f"  Cheque bonus for CHQ in desc + normal beacon: {bonus_none}")
+
+    bonus_no_chq = system._calculate_cheque_bonus("Normal payment", beacon_cheque)
+    assert bonus_no_chq == 0, "Should NOT get cheque bonus when bank has no cheque/chq"
+    print(f"  Cheque bonus for normal desc + cheque beacon: {bonus_no_chq}")
+
+    # Test "cheque" keyword no longer works in search_beacon_entries
+    results = system.search_beacon_entries("cheque")
+    # "cheque" should now be treated as a normal text search, not special keyword
+    print(f"  search_beacon_entries('cheque'): {len(results)} results (text match only)")
+
+    print("PASSED")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -651,6 +698,7 @@ def run_all_tests():
     test_allow_1_to_2_config()
     test_amount_search_ignores_sign()
     test_date_range_filter()
+    test_cheque_matching()
 
     # Final cleanup
     if os.path.exists(state_file):

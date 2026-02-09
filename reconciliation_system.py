@@ -563,6 +563,9 @@ class ReconciliationSystem:
             if self.match_beacon_detail and beacon.detail:
                 detail_score = self._calculate_name_score(bank_txn.description, beacon.detail)
                 name_score = max(name_score, detail_score)
+            # Cheque matching: boost name_score if bank desc mentions cheque and beacon is cheque
+            cheque_bonus = self._calculate_cheque_bonus(bank_txn.description, beacon)
+            name_score = max(name_score, cheque_bonus)
             amount_score = self._calculate_amount_score(bank_txn.amount)
 
             # Skip if name is 0% and amount is common
@@ -671,10 +674,14 @@ class ReconciliationSystem:
         if self.match_beacon_detail and beacon1.detail:
             detail_score1 = self._calculate_name_score(bank_txn.description, beacon1.detail)
             name_score1 = max(name_score1, detail_score1)
+        cheque_bonus1 = self._calculate_cheque_bonus(bank_txn.description, beacon1)
+        name_score1 = max(name_score1, cheque_bonus1)
         name_score2 = self._calculate_name_score(bank_txn.description, beacon2.payee)
         if self.match_beacon_detail and beacon2.detail:
             detail_score2 = self._calculate_name_score(bank_txn.description, beacon2.detail)
             name_score2 = max(name_score2, detail_score2)
+        cheque_bonus2 = self._calculate_cheque_bonus(bank_txn.description, beacon2)
+        name_score2 = max(name_score2, cheque_bonus2)
         name_score = (name_score1 + name_score2) / 2
 
         is_common1 = beacon1.amount in self.common_amounts
@@ -933,6 +940,15 @@ class ReconciliationSystem:
         )
 
         return min(1.0, max(0.0, confidence))
+
+    def _calculate_cheque_bonus(self, bank_description: str, beacon: 'BeaconEntry') -> float:
+        """Return a name_score bonus if bank description mentions cheque and beacon is a cheque payment."""
+        if beacon.payment_method.lower() != 'cheque':
+            return 0.0
+        desc_lower = bank_description.lower()
+        if 'cheque' in desc_lower or 'chq' in desc_lower:
+            return 0.4
+        return 0.0
 
     def _trans_no_within_range(self, trans_no1: str, trans_no2: str, max_diff: int) -> bool:
         """Check if two transaction numbers are within max_diff of each other."""
@@ -1225,6 +1241,13 @@ class ReconciliationSystem:
                 results.append(i)
         return results
 
+    def get_cheque_beacon_entries(self, available_only: bool = False) -> List[BeaconEntry]:
+        """Get all beacon entries where payment_method is cheque."""
+        entries = self.beacon_entries
+        if available_only:
+            entries = [b for b in entries if b.id not in self._reconciled_beacon_ids]
+        return [b for b in entries if b.payment_method.lower() == 'cheque']
+
     def search_beacon_entries(self, search_term: str,
                                available_only: bool = False) -> List[BeaconEntry]:
         """Search beacon entries by various criteria.
@@ -1242,11 +1265,6 @@ class ReconciliationSystem:
         entries = self.beacon_entries
         if available_only:
             entries = [b for b in entries if b.id not in self._reconciled_beacon_ids]
-
-        # Special keyword: "cheque" filters by payment_method
-        if term == 'cheque':
-            return [b for b in entries
-                    if b.payment_method.lower() == 'cheque']
 
         results = []
         for beacon in entries:
