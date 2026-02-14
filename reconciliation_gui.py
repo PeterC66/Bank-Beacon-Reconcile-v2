@@ -345,7 +345,6 @@ class ReconciliationGUI:
         self.bank_search_entry.pack(side=tk.LEFT, padx=3)
         self.bank_search_entry.bind('<Return>', self._on_bank_search)
         ttk.Button(search_frame, text="Find", command=self._on_bank_search).pack(side=tk.LEFT, padx=1)
-        ttk.Button(search_frame, text="Next", command=self._on_bank_search_next).pack(side=tk.LEFT, padx=1)
         ttk.Button(search_frame, text="Clear", command=self._on_bank_search_clear).pack(side=tk.LEFT, padx=1)
         self.bank_search_result = ttk.Label(search_frame, text="", foreground='gray',
                                              style='Small.TLabel')
@@ -568,6 +567,11 @@ class ReconciliationGUI:
                     member_names.append(b.member_1)
                 if b.member_2 and b.member_2 not in member_names:
                     member_names.append(b.member_2)
+            # Fall back to bank description if beacons have no member fields
+            if not member_names:
+                member_names = self._get_member_names_from_bank(bank)
+                if member_names:
+                    source_label = " (from bank description)"
         elif rec and rec.status == 'manually_resolved':
             # Manually resolved - use bank-derived member
             member_names = self._get_member_names_from_bank(bank)
@@ -809,18 +813,26 @@ class ReconciliationGUI:
 
         # Navigation label
         if self.bank_list:
+            nav_suffix = '  (all)' if self.show_all_bank else '  (un-reconciled)'
+            if self.bank_search_matches:
+                nav_suffix = f'  (search {self.bank_search_index + 1}/{len(self.bank_search_matches)})'
             self.bank_nav_label.config(
-                text=f"{self.bank_index + 1} / {len(self.bank_list)}"
-                     f"{'  (all)' if self.show_all_bank else '  (un-reconciled)'}"
+                text=f"{self.bank_index + 1} / {len(self.bank_list)}{nav_suffix}"
             )
         else:
             self.bank_nav_label.config(text="No entries")
 
-        # Navigation buttons
-        self.bank_prev_btn.config(state=tk.NORMAL if self.bank_index > 0 else tk.DISABLED)
-        self.bank_next_btn.config(
-            state=tk.NORMAL if self.bank_index < len(self.bank_list) - 1 else tk.DISABLED
-        )
+        # Navigation buttons - use search bounds if search active
+        if self.bank_search_matches:
+            self.bank_prev_btn.config(
+                state=tk.NORMAL if self.bank_search_index > 0 else tk.DISABLED)
+            self.bank_next_btn.config(
+                state=tk.NORMAL if self.bank_search_index < len(self.bank_search_matches) - 1 else tk.DISABLED)
+        else:
+            self.bank_prev_btn.config(state=tk.NORMAL if self.bank_index > 0 else tk.DISABLED)
+            self.bank_next_btn.config(
+                state=tk.NORMAL if self.bank_index < len(self.bank_list) - 1 else tk.DISABLED
+            )
 
         if not bank:
             self.bank_id_label.config(text="--")
@@ -1081,15 +1093,33 @@ class ReconciliationGUI:
     # -------------------------------------------------------------------
 
     def _on_bank_prev(self):
-        """Navigate to previous bank entry."""
-        if self.bank_index > 0:
+        """Navigate to previous bank entry (or previous search result)."""
+        if self.bank_search_matches:
+            if self.bank_search_index > 0:
+                self.bank_search_index -= 1
+                self.bank_index = self.bank_search_matches[self.bank_search_index]
+                self._refresh_candidates()
+                self._update_display()
+                self.bank_search_result.config(
+                    text=f"{self.bank_search_index + 1} / {len(self.bank_search_matches)}"
+                )
+        elif self.bank_index > 0:
             self.bank_index -= 1
             self._refresh_candidates()
             self._update_display()
 
     def _on_bank_next(self):
-        """Navigate to next bank entry."""
-        if self.bank_index < len(self.bank_list) - 1:
+        """Navigate to next bank entry (or next search result)."""
+        if self.bank_search_matches:
+            if self.bank_search_index < len(self.bank_search_matches) - 1:
+                self.bank_search_index += 1
+                self.bank_index = self.bank_search_matches[self.bank_search_index]
+                self._refresh_candidates()
+                self._update_display()
+                self.bank_search_result.config(
+                    text=f"{self.bank_search_index + 1} / {len(self.bank_search_matches)}"
+                )
+        elif self.bank_index < len(self.bank_list) - 1:
             self.bank_index += 1
             self._refresh_candidates()
             self._update_display()
@@ -1452,18 +1482,6 @@ class ReconciliationGUI:
         self._update_display()
         self.bank_search_result.config(
             text=f"1 / {len(self.bank_search_matches)}", foreground='gray'
-        )
-
-    def _on_bank_search_next(self):
-        """Go to next bank search result."""
-        if not self.bank_search_matches:
-            return
-        self.bank_search_index = (self.bank_search_index + 1) % len(self.bank_search_matches)
-        self.bank_index = self.bank_search_matches[self.bank_search_index]
-        self._refresh_candidates()
-        self._update_display()
-        self.bank_search_result.config(
-            text=f"{self.bank_search_index + 1} / {len(self.bank_search_matches)}"
         )
 
     def _on_bank_search_clear(self):
