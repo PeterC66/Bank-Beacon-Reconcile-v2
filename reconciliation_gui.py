@@ -53,9 +53,8 @@ class ReconciliationGUI:
         self.system = ReconciliationSystem(data_dir=data_dir, code_dir=code_dir)
         self.system.load_data()
 
-        # Update window title with config title
-        title = self.system.config.get('title', 'Bank Beacon Reconciliation')
-        self.master.title(f"{title} v{VERSION}")
+        # Update window title
+        self.master.title(f"{self.system._get_title()} v{VERSION}")
 
         bank_count = len(self.system.bank_transactions)
         beacon_count = len(self.system.beacon_entries)

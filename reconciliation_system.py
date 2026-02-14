@@ -180,7 +180,7 @@ class ReconciliationSystem:
     """
 
     DEFAULT_CONFIG = {
-        'title': 'Bank Beacon Reconciliation',
+        'title': None,  # Default: derived from ledger_account + ledger_date_to
         'bank_file': 'Bank_Transactions.csv',
         'beacon_file': 'Beacon_Entries.csv',
         'backup_file': None,           # Excel backup file (at code level) - replaces beacon_file + member_lookup
@@ -710,10 +710,10 @@ class ReconciliationSystem:
             writer = csv.writer(f)
 
             # Header
-            title = self.config.get('title', 'Bank Beacon Reconciliation')
-            writer.writerow([title])
+            writer.writerow([self._get_title()])
             writer.writerow([f"Comparison Report - {datetime.now().strftime('%d/%m/%Y %H:%M')}"])
-            writer.writerow([f"Excel backup vs: {beacon_csv_path}"])
+            writer.writerow([f"Input file: {self._get_input_file_label()}"])
+            writer.writerow([f"Compared with: {beacon_csv_path}"])
             writer.writerow([])
 
             # Summary
@@ -1783,12 +1783,31 @@ class ReconciliationSystem:
     # Export / Reports
     # -------------------------------------------------------------------
 
+    def _get_title(self) -> str:
+        """Get the reconciliation title. Uses config title if set,
+        otherwise derives from ledger_account and ledger_date_to."""
+        title = self.config.get('title')
+        if title:
+            return title
+        # Derive from ledger config
+        account = self.config.get('ledger_account', '')
+        date_to = self.config.get('ledger_date_to', '')
+        if account and date_to:
+            return f"{account} to {date_to}"
+        return 'Bank Beacon Reconciliation'
+
+    def _get_input_file_label(self) -> str:
+        """Get the input file label for report headers."""
+        if self.backup_file:
+            return self.config.get('backup_file', '')
+        return self.config.get('beacon_file', 'Beacon_Entries.csv')
+
     def _write_report_header(self, writer, report_name: str):
-        """Write standard report header rows: title, report name, date/time."""
-        title = self.config.get('title', 'Bank Beacon Reconciliation')
-        writer.writerow([title])
+        """Write standard report header rows: title, report name, date/time, input file."""
+        writer.writerow([self._get_title()])
         writer.writerow([report_name])
         writer.writerow([f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"])
+        writer.writerow([f"Input file: {self._get_input_file_label()}"])
         writer.writerow([])  # Blank separator row
 
     def export_reconciled_csv(self, filepath: str) -> int:
@@ -1877,13 +1896,13 @@ class ReconciliationSystem:
 
     def export_stats_summary(self, filepath: str):
         """Export a stats summary report."""
-        title = self.config.get('title', 'Bank Beacon Reconciliation')
         stats = self.get_statistics()
         with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(f"{title}\n")
+            f.write(f"{self._get_title()}\n")
             f.write(f"Summary Report\n")
             f.write(f"Version: {VERSION}\n")
             f.write(f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
+            f.write(f"Input file: {self._get_input_file_label()}\n")
             f.write(f"Data folder: {self.data_dir}\n")
             f.write(f"{'='*60}\n\n")
             f.write(f"Bank transactions:      {stats['total_bank']}\n")
