@@ -1651,6 +1651,21 @@ class ReconciliationGUI:
         r4 = self.system.export_resolved_csv(resolved_path)
         self.system.export_stats_summary(stats_path)
 
+        comparison_msg = ""
+        if self.system.backup_file:
+            # Also generate comparison report if a beacon CSV exists
+            beacon_csv = os.path.join(data_dir, self.system.config.get('beacon_file', 'Beacon_Entries.csv'))
+            if os.path.exists(beacon_csv):
+                comp_path = os.path.join(data_dir, "report_comparison.csv")
+                self.system.export_comparison_report(beacon_csv, comp_path)
+                result = self.system.compare_with_beacon_csv(beacon_csv)
+                comparison_msg = (
+                    f"\n6. Comparison report: {len(result['in_both'])} matched, "
+                    f"{len(result['only_in_excel'])} only in Excel, "
+                    f"{len(result['only_in_csv'])} only in CSV, "
+                    f"{len(result['differences'])} with differences"
+                )
+
         messagebox.showinfo(
             "Reports Generated",
             f"Reports saved to:\n{data_dir}\n\n"
@@ -1658,7 +1673,8 @@ class ReconciliationGUI:
             f"2. Un-reconciled bank: {r2} rows\n"
             f"3. Un-reconciled beacon: {r3} rows\n"
             f"4. Manually resolved: {r4} rows\n"
-            f"5. Stats summary\n\n"
+            f"5. Stats summary"
+            f"{comparison_msg}\n\n"
             f"Version: {VERSION}"
         )
 

@@ -35,6 +35,11 @@ from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 from enum import Enum
 
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
 
 def debug_log(message: str):
     """Print debug message with line number."""
@@ -178,6 +183,11 @@ class ReconciliationSystem:
         'title': 'Bank Beacon Reconciliation',
         'bank_file': 'Bank_Transactions.csv',
         'beacon_file': 'Beacon_Entries.csv',
+        'backup_file': None,           # Excel backup file (at code level) - replaces beacon_file + member_lookup
+        'ledger_account': None,        # Required if backup_file set: which account to include (e.g. "Current")
+        'ledger_date_from': None,      # Required if backup_file set: inclusive start date (dd/mm/yyyy)
+        'ledger_date_to': None,        # Required if backup_file set: inclusive end date (dd/mm/yyyy)
+        'ledger_exclude_cleared': True, # Exclude ledger rows with a Cleared date
         'common_amounts': ['13.00', '9.50', '6.50'],
         'date_tolerance_days': 7,
         'trans_no_limit': 5,
@@ -214,6 +224,27 @@ class ReconciliationSystem:
         self.beacon_file = os.path.join(data_dir, self.config['beacon_file'])
         self.state_file = os.path.join(data_dir, 'reconciliation_state_v2.json')
         self.member_lookup_file = os.path.join(code_dir, 'member_lookup.csv')
+
+        # Excel backup file (replaces beacon_file + member_lookup when set)
+        self.backup_file = None
+        if self.config.get('backup_file'):
+            self.backup_file = os.path.join(code_dir, self.config['backup_file'])
+
+        # Ledger filter config
+        self.ledger_account = self.config.get('ledger_account')
+        self.ledger_exclude_cleared = self.config.get('ledger_exclude_cleared', True)
+        self.ledger_date_from: Optional[datetime] = None
+        self.ledger_date_to: Optional[datetime] = None
+        if self.config.get('ledger_date_from'):
+            try:
+                self.ledger_date_from = datetime.strptime(self.config['ledger_date_from'], '%d/%m/%Y')
+            except ValueError:
+                print(f"Warning: Could not parse ledger_date_from: {self.config['ledger_date_from']}")
+        if self.config.get('ledger_date_to'):
+            try:
+                self.ledger_date_to = datetime.strptime(self.config['ledger_date_to'], '%d/%m/%Y')
+            except ValueError:
+                print(f"Warning: Could not parse ledger_date_to: {self.config['ledger_date_to']}")
 
         # Data
         self.bank_transactions: List[BankTransaction] = []
@@ -278,10 +309,18 @@ class ReconciliationSystem:
     # -------------------------------------------------------------------
 
     def load_data(self):
-        """Load transactions from CSV files and restore state."""
+        """Load transactions from files and restore state.
+
+        If backup_file is configured, beacon entries and member lookup are
+        extracted from the Excel backup file.  Otherwise, the CSV files are
+        used as before.
+        """
         self.bank_transactions = self._load_bank_transactions()
-        self.beacon_entries = self._load_beacon_entries()
-        self._load_member_lookup()
+        if self.backup_file:
+            self._load_from_excel_backup()
+        else:
+            self.beacon_entries = self._load_beacon_entries()
+            self._load_member_lookup()
         self._load_state()
         self._rebuild_indices()
 
@@ -391,6 +430,326 @@ class ReconciliationSystem:
                     print(f"Warning: Could not parse member lookup row: {e}")
 
         print(f"Loaded {len(self.member_lookup)} member lookup entries")
+
+    # -------------------------------------------------------------------
+    # Excel backup file loading
+    # -------------------------------------------------------------------
+
+    def _load_from_excel_backup(self):
+        """Load beacon entries and member lookup from an Excel backup file."""
+        if openpyxl is None:
+            raise ImportError("openpyxl is required to read Excel backup files. "
+                              "Install with: pip install openpyxl")
+
+        if not os.path.exists(self.backup_file):
+            print(f"Warning: Backup file not found: {self.backup_file}")
+            return
+
+        # Validate required config
+        if not self.ledger_account:
+            print("Error: ledger_account must be specified in config when using backup_file")
+            return
+        if not self.ledger_date_from or not self.ledger_date_to:
+            print("Error: ledger_date_from and ledger_date_to must be specified in config when using backup_file")
+            return
+
+        print(f"Loading from Excel backup: {self.backup_file}")
+        wb = openpyxl.load_workbook(self.backup_file, data_only=True)
+
+        self._load_members_from_excel(wb)
+        self.beacon_entries = self._load_ledger_from_excel(wb)
+
+        wb.close()
+
+    def _load_members_from_excel(self, wb):
+        """Extract member lookup from the Members worksheet."""
+        self.member_lookup = {}
+
+        if 'Members' not in wb.sheetnames:
+            print("Warning: No 'Members' worksheet found in backup file")
+            return
+
+        ws = wb['Members']
+        # Build header map
+        headers = {}
+        for col in range(1, ws.max_column + 1):
+            val = ws.cell(row=1, column=col).value
+            if val:
+                headers[val.strip().lower()] = col
+
+        required = ['mem_no', 'status', 'forename', 'surname']
+        for req in required:
+            if req not in headers:
+                print(f"Warning: Members worksheet missing required column: {req}")
+                return
+
+        for row in range(2, ws.max_row + 1):
+            mem_no_val = ws.cell(row=row, column=headers['mem_no']).value
+            if mem_no_val is None:
+                continue
+            mem_no = str(mem_no_val).strip()
+            if not mem_no:
+                continue
+
+            status_val = ws.cell(row=row, column=headers['status']).value
+            forename_val = ws.cell(row=row, column=headers['forename']).value
+            surname_val = ws.cell(row=row, column=headers['surname']).value
+            known_as_val = ws.cell(row=row, column=headers.get('known_as', 0)).value if 'known_as' in headers else None
+            class_val = ws.cell(row=row, column=headers.get('class', 0)).value if 'class' in headers else None
+            payment_type_val = ws.cell(row=row, column=headers.get('payment_type', 0)).value if 'payment_type' in headers else None
+
+            self.member_lookup[mem_no] = {
+                'status': str(status_val or '').strip(),
+                'forename': str(forename_val or '').strip(),
+                'surname': str(surname_val or '').strip(),
+                'known_as': str(known_as_val or '').strip(),
+                'class': str(class_val or '').strip(),
+                'payment_type': str(payment_type_val or '').strip(),
+            }
+
+        print(f"Loaded {len(self.member_lookup)} member lookup entries from Excel")
+
+    def _load_ledger_from_excel(self, wb) -> List[BeaconEntry]:
+        """Extract beacon entries from the Ledger worksheet with filtering."""
+        entries = []
+
+        if 'Ledger' not in wb.sheetnames:
+            print("Warning: No 'Ledger' worksheet found in backup file")
+            return entries
+
+        ws = wb['Ledger']
+        # Build header map
+        headers = {}
+        for col in range(1, ws.max_column + 1):
+            val = ws.cell(row=1, column=col).value
+            if val:
+                headers[val.strip().lower()] = col
+
+        required = ['trans_no', 'date', 'account', 'amount', 'payee']
+        for req in required:
+            if req not in headers:
+                print(f"Warning: Ledger worksheet missing required column: {req}")
+                return entries
+
+        skipped_account = 0
+        skipped_date = 0
+        skipped_cleared = 0
+        loaded = 0
+
+        for row in range(2, ws.max_row + 1):
+            # Read key fields
+            trans_no_val = ws.cell(row=row, column=headers['trans_no']).value
+            if trans_no_val is None:
+                continue
+
+            # Filter by account
+            account_val = ws.cell(row=row, column=headers['account']).value
+            account = str(account_val or '').strip()
+            if account != self.ledger_account:
+                skipped_account += 1
+                continue
+
+            # Filter by date
+            date_val = ws.cell(row=row, column=headers['date']).value
+            if date_val is None:
+                skipped_date += 1
+                continue
+
+            # Parse date - may be datetime object from Excel or string
+            if isinstance(date_val, datetime):
+                entry_date = date_val
+            else:
+                try:
+                    entry_date = datetime.strptime(str(date_val).strip(), '%d/%m/%Y')
+                except ValueError:
+                    try:
+                        entry_date = datetime.strptime(str(date_val).strip(), '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        print(f"Warning: Could not parse ledger date row {row}: {date_val}")
+                        skipped_date += 1
+                        continue
+
+            if entry_date < self.ledger_date_from or entry_date > self.ledger_date_to:
+                skipped_date += 1
+                continue
+
+            # Filter by cleared
+            if self.ledger_exclude_cleared:
+                cleared_col = headers.get('cleared')
+                if cleared_col:
+                    cleared_val = ws.cell(row=row, column=cleared_col).value
+                    if cleared_val is not None and str(cleared_val).strip() != '':
+                        skipped_cleared += 1
+                        continue
+
+            # Read all fields
+            amount_val = ws.cell(row=row, column=headers['amount']).value
+            try:
+                amount = Decimal(str(amount_val).strip().replace(',', ''))
+            except Exception:
+                print(f"Warning: Could not parse ledger amount row {row}: {amount_val}")
+                continue
+
+            payee_val = ws.cell(row=row, column=headers['payee']).value
+            detail_val = ws.cell(row=row, column=headers.get('detail', 0)).value if 'detail' in headers else None
+            member_1_val = ws.cell(row=row, column=headers.get('member_1', 0)).value if 'member_1' in headers else None
+            member_2_val = ws.cell(row=row, column=headers.get('member_2', 0)).value if 'member_2' in headers else None
+            payment_method_val = ws.cell(row=row, column=headers.get('payment_method', 0)).value if 'payment_method' in headers else None
+
+            entry = BeaconEntry(
+                id=f"BEACON_{loaded:04d}",
+                date=entry_date,
+                trans_no=str(trans_no_val).strip(),
+                payee=str(payee_val or '').strip(),
+                amount=amount,
+                detail=str(detail_val or '').strip(),
+                member_1=str(member_1_val or '').strip(),
+                member_2=str(member_2_val or '').strip(),
+                payment_method=str(payment_method_val or '').strip(),
+                raw_data={'account': account, 'row': row}
+            )
+            entries.append(entry)
+            loaded += 1
+
+        print(f"Loaded {loaded} ledger entries from Excel "
+              f"(skipped: {skipped_account} account, {skipped_date} date, {skipped_cleared} cleared)")
+
+        return entries
+
+    def compare_with_beacon_csv(self, beacon_csv_path: str) -> Dict:
+        """Compare extracted ledger entries against an existing Beacon_Entries CSV.
+
+        Matches on trans_no. Returns a dict with:
+        - 'only_in_excel': entries in extracted ledger but not in CSV
+        - 'only_in_csv': entries in CSV but not in extracted ledger
+        - 'in_both': entries in both (matched by trans_no)
+        - 'differences': entries in both but with differing field values
+        """
+        # Load the CSV beacon entries
+        csv_entries = {}
+        if not os.path.exists(beacon_csv_path):
+            print(f"Warning: Beacon CSV not found: {beacon_csv_path}")
+            return {'only_in_excel': [], 'only_in_csv': [], 'in_both': [], 'differences': []}
+
+        with open(beacon_csv_path, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                trans_no = row.get('trans_no', '').strip()
+                if trans_no:
+                    csv_entries[trans_no] = row
+
+        # Build lookup of current extracted entries by trans_no
+        excel_entries = {}
+        for beacon in self.beacon_entries:
+            excel_entries[beacon.trans_no] = beacon
+
+        only_in_excel = []
+        only_in_csv = []
+        in_both = []
+        differences = []
+
+        # Check what's in Excel but not CSV
+        for trans_no, beacon in excel_entries.items():
+            if trans_no not in csv_entries:
+                only_in_excel.append({
+                    'trans_no': trans_no,
+                    'date': beacon.date.strftime('%d/%m/%Y'),
+                    'payee': beacon.payee,
+                    'amount': str(beacon.amount),
+                })
+
+        # Check what's in CSV but not Excel
+        for trans_no, row in csv_entries.items():
+            if trans_no not in excel_entries:
+                only_in_csv.append({
+                    'trans_no': trans_no,
+                    'date': row.get('date', ''),
+                    'payee': row.get('payee', ''),
+                    'amount': row.get('amount', ''),
+                })
+
+        # Check entries in both for differences
+        compare_fields = ['date', 'payee', 'amount', 'detail', 'member_1', 'member_2', 'payment_method']
+        for trans_no in excel_entries:
+            if trans_no in csv_entries:
+                in_both.append(trans_no)
+                beacon = excel_entries[trans_no]
+                csv_row = csv_entries[trans_no]
+                diffs = {}
+                for field_name in compare_fields:
+                    excel_val = ''
+                    csv_val = csv_row.get(field_name, '').strip()
+                    if field_name == 'date':
+                        excel_val = beacon.date.strftime('%d/%m/%Y')
+                    elif field_name == 'amount':
+                        excel_val = str(beacon.amount)
+                        # Normalise CSV amount for comparison
+                        try:
+                            csv_val = str(Decimal(csv_val.replace(',', '')))
+                        except Exception:
+                            pass
+                    else:
+                        excel_val = getattr(beacon, field_name, '')
+                    if excel_val != csv_val:
+                        diffs[field_name] = {'excel': excel_val, 'csv': csv_val}
+                if diffs:
+                    differences.append({'trans_no': trans_no, 'diffs': diffs})
+
+        return {
+            'only_in_excel': only_in_excel,
+            'only_in_csv': only_in_csv,
+            'in_both': in_both,
+            'differences': differences,
+        }
+
+    def export_comparison_report(self, beacon_csv_path: str, output_path: str) -> str:
+        """Export a comparison report between extracted ledger and an existing beacon CSV."""
+        result = self.compare_with_beacon_csv(beacon_csv_path)
+
+        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+
+            # Header
+            title = self.config.get('title', 'Bank Beacon Reconciliation')
+            writer.writerow([title])
+            writer.writerow([f"Comparison Report - {datetime.now().strftime('%d/%m/%Y %H:%M')}"])
+            writer.writerow([f"Excel backup vs: {beacon_csv_path}"])
+            writer.writerow([])
+
+            # Summary
+            writer.writerow(["Summary"])
+            writer.writerow(["Matched (in both)", len(result['in_both'])])
+            writer.writerow(["Only in Excel backup", len(result['only_in_excel'])])
+            writer.writerow(["Only in CSV", len(result['only_in_csv'])])
+            writer.writerow(["Matched with differences", len(result['differences'])])
+            writer.writerow([])
+
+            # Only in Excel
+            if result['only_in_excel']:
+                writer.writerow(["ONLY IN EXCEL BACKUP"])
+                writer.writerow(["trans_no", "date", "payee", "amount"])
+                for entry in result['only_in_excel']:
+                    writer.writerow([entry['trans_no'], entry['date'], entry['payee'], entry['amount']])
+                writer.writerow([])
+
+            # Only in CSV
+            if result['only_in_csv']:
+                writer.writerow(["ONLY IN CSV"])
+                writer.writerow(["trans_no", "date", "payee", "amount"])
+                for entry in result['only_in_csv']:
+                    writer.writerow([entry['trans_no'], entry['date'], entry['payee'], entry['amount']])
+                writer.writerow([])
+
+            # Differences
+            if result['differences']:
+                writer.writerow(["DIFFERENCES (matched by trans_no)"])
+                writer.writerow(["trans_no", "field", "excel_value", "csv_value"])
+                for diff in result['differences']:
+                    for field_name, vals in diff['diffs'].items():
+                        writer.writerow([diff['trans_no'], field_name, vals['excel'], vals['csv']])
+                writer.writerow([])
+
+        return output_path
 
     # -------------------------------------------------------------------
     # State management (v2 format)

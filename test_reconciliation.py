@@ -671,6 +671,90 @@ def test_cheque_matching():
     print("PASSED")
 
 
+def test_excel_backup_loading():
+    """Test loading beacon entries and member lookup from Excel backup file."""
+    print("\n=== Test: Excel Backup Loading ===")
+
+    # Create a config that uses the test Excel backup
+    import json
+    import shutil
+
+    test_config = {
+        "title": "Excel Backup Test",
+        "bank_file": "Bank_Transactions.csv",
+        "beacon_file": "Beacon_Entries.csv",
+        "backup_file": "data/sample/test_backup.xlsx",
+        "ledger_account": "Current",
+        "ledger_date_from": "01/01/2025",
+        "ledger_date_to": "28/02/2025",
+        "ledger_exclude_cleared": True,
+        "common_amounts": ["13.00", "9.50", "6.50"],
+        "date_tolerance_days": 7,
+        "trans_no_limit": 5,
+        "auto_reconcile_common_threshold": 0.90,
+        "auto_reconcile_other_threshold": 0.80,
+        "allow_1_to_2": True,
+        "match_beacon_detail": True
+    }
+
+    # Save temp config
+    config_path = os.path.join(DATA_DIR, "config.json")
+    original_config = open(config_path, 'r').read()
+    with open(config_path, 'w') as f:
+        json.dump(test_config, f, indent=2)
+
+    try:
+        state_file = os.path.join(DATA_DIR, "reconciliation_state_v2.json")
+        if os.path.exists(state_file):
+            os.remove(state_file)
+
+        system = ReconciliationSystem(data_dir=DATA_DIR, code_dir=CODE_DIR)
+        system.load_data()
+
+        # Check members loaded
+        assert len(system.member_lookup) == 3, \
+            f"Expected 3 members, got {len(system.member_lookup)}"
+        assert '823' in system.member_lookup
+        assert system.member_lookup['823']['forename'] == 'L'
+        assert system.member_lookup['823']['surname'] == 'Leonard'
+        assert system.member_lookup['823']['class'] == 'Standard'
+        assert system.member_lookup['823']['payment_type'] == 'DD'
+        print(f"  Members loaded: {len(system.member_lookup)}")
+        print(f"    Member 823: {system.member_lookup['823']}")
+
+        # Check beacon entries loaded (should be 3: TRN001, TRN002, TRN003)
+        # Excluded: TRN004 (Cash account), TRN005 (cleared), TRN006 (out of date range)
+        assert len(system.beacon_entries) == 3, \
+            f"Expected 3 beacon entries, got {len(system.beacon_entries)}"
+        trans_nos = {b.trans_no for b in system.beacon_entries}
+        assert trans_nos == {'TRN001', 'TRN002', 'TRN003'}, \
+            f"Unexpected trans_nos: {trans_nos}"
+        print(f"  Beacon entries loaded: {len(system.beacon_entries)}")
+        for b in system.beacon_entries:
+            print(f"    {b.trans_no}: {b.payee} £{b.amount} ({b.payment_method})")
+
+        # Check cheque beacon
+        chq = [b for b in system.beacon_entries if b.trans_no == 'TRN003'][0]
+        assert chq.payment_method == 'Cheque'
+        assert chq.member_1 == 'JonesA'
+        print(f"  Cheque entry TRN003: payment_method={chq.payment_method}, member_1={chq.member_1}")
+
+        # Test comparison with existing CSV
+        beacon_csv = os.path.join(DATA_DIR, "Beacon_Entries.csv")
+        result = system.compare_with_beacon_csv(beacon_csv)
+        print(f"  Comparison: {len(result['in_both'])} matched, "
+              f"{len(result['only_in_excel'])} only in Excel, "
+              f"{len(result['only_in_csv'])} only in CSV, "
+              f"{len(result['differences'])} with differences")
+
+    finally:
+        # Restore original config
+        with open(config_path, 'w') as f:
+            f.write(original_config)
+
+    print("PASSED")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -706,6 +790,7 @@ def run_all_tests():
     test_amount_search_ignores_sign()
     test_date_range_filter()
     test_cheque_matching()
+    test_excel_backup_loading()
 
     # Final cleanup
     if os.path.exists(state_file):
