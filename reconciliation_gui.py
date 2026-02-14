@@ -509,20 +509,22 @@ class ReconciliationGUI:
         tree_frame = ttk.Frame(self.member_panel)
         tree_frame.pack(fill=tk.X)
 
-        columns = ('trans_no', 'date', 'amount', 'payee', 'status')
+        columns = ('trans_no', 'date', 'amount', 'payee', 'detail', 'status')
         self.member_tree = ttk.Treeview(tree_frame, columns=columns, show='headings',
                                          height=6, selectmode='browse')
         self.member_tree.heading('trans_no', text='Trans No')
         self.member_tree.heading('date', text='Date')
         self.member_tree.heading('amount', text='Amount')
         self.member_tree.heading('payee', text='Payee')
+        self.member_tree.heading('detail', text='Detail')
         self.member_tree.heading('status', text='Status')
 
-        self.member_tree.column('trans_no', width=65, minwidth=50)
-        self.member_tree.column('date', width=75, minwidth=65)
-        self.member_tree.column('amount', width=65, minwidth=50)
-        self.member_tree.column('payee', width=180, minwidth=80)
-        self.member_tree.column('status', width=110, minwidth=70)
+        self.member_tree.column('trans_no', width=55, minwidth=45)
+        self.member_tree.column('date', width=68, minwidth=58)
+        self.member_tree.column('amount', width=58, minwidth=45)
+        self.member_tree.column('payee', width=130, minwidth=60)
+        self.member_tree.column('detail', width=100, minwidth=50)
+        self.member_tree.column('status', width=85, minwidth=60)
 
         tree_scroll = ttk.Scrollbar(tree_frame, orient='vertical',
                                      command=self.member_tree.yview)
@@ -630,11 +632,13 @@ class ReconciliationGUI:
                     status = "Un-reconciled"
                     tag = 'unreconciled_alt' if row_num % 2 else 'unreconciled'
 
+                detail_text = beacon.detail[:30] if beacon.detail else ""
                 item_id = self.member_tree.insert('', 'end', values=(
                     beacon.trans_no,
                     beacon.date.strftime('%d/%m/%Y'),
                     f"{chr(163)}{beacon.amount}",
                     beacon.payee,
+                    detail_text,
                     status
                 ), tags=(tag,))
                 self._member_tree_beacon_ids[item_id] = (beacon.id, bank_id)
@@ -989,8 +993,8 @@ class ReconciliationGUI:
         widgets['date'].config(text=beacon.date.strftime('%d/%m/%Y'))
         widgets['payee'].config(text=beacon.payee)
         widgets['detail'].config(text=beacon.detail)
-        widgets['member_1'].config(text=beacon.member_1 or "--")
-        widgets['member_2'].config(text=beacon.member_2 or "--")
+        widgets['member_1'].config(text=self.system.get_beacon_member_display(beacon, 1))
+        widgets['member_2'].config(text=self.system.get_beacon_member_display(beacon, 2))
         widgets['amount'].config(text=f"{chr(163)}{beacon.amount}")
         widgets['id'].config(text=beacon.id)
 

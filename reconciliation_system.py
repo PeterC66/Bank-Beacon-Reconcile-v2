@@ -444,11 +444,13 @@ class ReconciliationSystem:
     # -------------------------------------------------------------------
 
     TITLE_PREFIXES = {'MR', 'MRS', 'MS', 'MISS', 'DR', 'PROF', 'REV', 'SIR', 'LADY', 'LORD'}
+    NAME_NOISE_WORDS = {'REFUND', 'REFUNDS', 'SUBS', 'SUB'}
 
     def _strip_titles(self, name: str) -> str:
-        """Strip title prefixes (MR, MRS, etc.) from a name string."""
+        """Strip title prefixes (MR, MRS, etc.) and noise words (REFUND, etc.) from a name string."""
+        all_prefixes = self.TITLE_PREFIXES | self.NAME_NOISE_WORDS
         parts = name.strip().split()
-        while parts and parts[0].upper().rstrip('.') in self.TITLE_PREFIXES:
+        while parts and parts[0].upper().rstrip('.') in all_prefixes:
             parts.pop(0)
         return ''.join(parts)
 
@@ -470,11 +472,21 @@ class ReconciliationSystem:
     def _resolve_name_to_memno(self, member_name: str,
                                 name_to_memno: Dict[str, str]) -> str:
         """Resolve a member name (ForenameSurname) to a member number.
-        Strips titles before matching."""
+        Strips titles and noise words (REFUND etc.) before matching."""
         if not member_name:
             return ""
         cleaned = self._strip_titles(member_name).replace(' ', '').upper()
-        return name_to_memno.get(cleaned, "")
+        result = name_to_memno.get(cleaned, "")
+        if not result:
+            # Try stripping noise word prefixes joined without space (e.g. "RefundSmithJ")
+            for word in sorted(self.NAME_NOISE_WORDS, key=len, reverse=True):
+                if cleaned.startswith(word):
+                    alt = cleaned[len(word):]
+                    if alt:
+                        result = name_to_memno.get(alt, "")
+                        if result:
+                            break
+        return result
 
     def _resolve_member_numbers(self):
         """Resolve member numbers on all bank and beacon entries.
@@ -1283,6 +1295,44 @@ class ReconciliationSystem:
                 lines.append(f"{num} is an unknown mem_no")
 
         return "\n".join(lines)
+
+    def get_beacon_member_display(self, beacon: BeaconEntry, field_num: int) -> str:
+        """Get display text for a beacon's member field with resolved info.
+
+        Args:
+            beacon: The beacon entry.
+            field_num: 1 for member_1/mem_no_1, 2 for member_2/mem_no_2.
+
+        Returns display string like:
+            "#1679 Virginia (Ginny) Wykes"  (resolved)
+            "SmithJ (not recognised)"       (name present but unresolved)
+            "--"                            (no member info)
+        """
+        member_text = beacon.member_1 if field_num == 1 else beacon.member_2
+        mem_no = beacon.mem_no_1 if field_num == 1 else beacon.mem_no_2
+
+        if mem_no:
+            info = self.member_lookup.get(mem_no)
+            if info:
+                known_as = info.get('known_as', '').strip()
+                if known_as:
+                    name = f"{info['forename']} ({known_as}) {info['surname']}"
+                else:
+                    name = f"{info['forename']} {info['surname']}"
+                return f"#{mem_no} {name}"
+            return f"#{mem_no}"
+
+        if member_text:
+            # Name present but not resolved - explain why
+            name_to_memno = self._build_name_to_memno_lookup()
+            cleaned = self._strip_titles(member_text).replace(' ', '').upper()
+            # Check for duplicate matches (same name mapping to different numbers)
+            matches = [mn for name, mn in name_to_memno.items() if name == cleaned]
+            if len(matches) > 1:
+                return f"{member_text} (duplicate members)"
+            return f"{member_text} (not recognised)"
+
+        return "--"
 
     def _calculate_member_match_score(self, bank_txn: BankTransaction,
                                        beacon: BeaconEntry) -> float:

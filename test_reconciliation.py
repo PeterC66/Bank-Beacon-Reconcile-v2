@@ -686,6 +686,10 @@ def test_member_number_resolution():
     assert system._strip_titles("DR PROF JohnSmith") == "JohnSmith"
     assert system._strip_titles("JohnSmith") == "JohnSmith"
     assert system._strip_titles("") == ""
+    # Noise words (Refund, Subs)
+    assert system._strip_titles("Refund JohnSmith") == "JohnSmith"
+    assert system._strip_titles("REFUND MRS JaneSmith") == "JaneSmith"
+    assert system._strip_titles("Subs LLeonard") == "LLeonard"
     print("  _strip_titles: PASSED")
 
     # --- Test _build_name_to_memno_lookup ---
@@ -706,7 +710,13 @@ def test_member_number_resolution():
     assert system._resolve_name_to_memno("MR LLeonard", lookup) == '823'
     assert system._resolve_name_to_memno("UnknownPerson", lookup) == ''
     assert system._resolve_name_to_memno("", lookup) == ''
-    print("  _resolve_name_to_memno: PASSED")
+    # Refund/noise word handling
+    assert system._resolve_name_to_memno("Refund LLeonard", lookup) == '823'
+    assert system._resolve_name_to_memno("REFUND MRS VirginiaWykes", lookup) == '1679'
+    assert system._resolve_name_to_memno("RefundLLeonard", lookup) == '823'  # no-space case
+    assert system._resolve_name_to_memno("RefundVirginiaWykes", lookup) == '1679'
+    assert system._resolve_name_to_memno("SubsBarbaraDuke", lookup) == '1783'
+    print("  _resolve_name_to_memno (with refund): PASSED")
 
     # --- Test _resolve_member_numbers on beacon entries ---
     # Create beacon entries with known member names and inject them
@@ -789,6 +799,29 @@ def test_member_number_resolution():
     assert test_beacon_blank.mem_no_1 == '823', \
         f"Backfill should set mem_no_1 to 823, got {test_beacon_blank.mem_no_1}"
     print("  _backfill_beacon_mem_nos: PASSED")
+
+    # --- Test get_beacon_member_display ---
+    # Resolved: should show "#mem_no FullName"
+    display_1 = system.get_beacon_member_display(test_beacon_1, 1)
+    assert "#823" in display_1 and "Leonard" in display_1, f"Got: {display_1}"
+
+    # Resolved with known_as: should show "(Ginny)"
+    display_3 = system.get_beacon_member_display(test_beacon_2, 1)
+    assert "#1679" in display_3 and "Ginny" in display_3, f"Got: {display_3}"
+
+    # Blank member: should show "--"
+    display_blank = system.get_beacon_member_display(test_beacon_1, 2)
+    assert display_blank == "--", f"Got: {display_blank}"
+
+    # Unresolved: should show name with "(not recognised)"
+    unknown = BeaconEntry(
+        id="TEST_UNK", date=datetime(2025, 1, 15),
+        trans_no="M005", payee="Unknown", detail="",
+        amount=Decimal("5.00"), member_1="ZZZNoMatch"
+    )
+    display_unk = system.get_beacon_member_display(unknown, 1)
+    assert "not recognised" in display_unk, f"Got: {display_unk}"
+    print("  get_beacon_member_display: PASSED")
 
     # Restore original state
     system.beacon_entries = original_beacons
