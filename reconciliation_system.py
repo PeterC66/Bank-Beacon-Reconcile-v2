@@ -256,6 +256,9 @@ class ReconciliationSystem:
         # State: reconciliations and rejected pairings
         self.reconciliations: List[Reconciliation] = []
         self.rejected_pairings: List[Dict] = []  # [{bank_id, beacon_id}, ...]
+        # Out-of-range state (preserved on save but not used in session)
+        self._out_of_range_reconciliations: List[Reconciliation] = []
+        self._out_of_range_rejected: List[Dict] = []
 
         # Derived lookups (rebuilt from state)
         self._reconciled_bank_ids: Dict[str, Reconciliation] = {}
@@ -756,7 +759,12 @@ class ReconciliationSystem:
     # -------------------------------------------------------------------
 
     def _load_state(self):
-        """Load saved state from v2 JSON file."""
+        """Load saved state from v2 JSON file.
+
+        Reconciliations and rejected pairings referencing bank entries
+        outside the configured date range are skipped so they don't
+        interfere with the current session or consistency checks.
+        """
         if not os.path.exists(self.state_file):
             return
 
@@ -764,11 +772,34 @@ class ReconciliationSystem:
             with open(self.state_file, 'r', encoding='utf-8') as f:
                 state = json.load(f)
 
-            self.reconciliations = [
-                Reconciliation.from_dict(r)
-                for r in state.get('reconciliations', [])
-            ]
-            self.rejected_pairings = state.get('rejected_pairings', [])
+            # Build set of in-range bank IDs for filtering
+            in_range_bank_ids = {b.id for b in self.bank_transactions
+                                 if self.is_bank_in_date_range(b)}
+
+            all_recs = [Reconciliation.from_dict(r)
+                        for r in state.get('reconciliations', [])]
+            all_rejected = state.get('rejected_pairings', [])
+
+            skipped_recs = 0
+            skipped_rejected = 0
+
+            self.reconciliations = []
+            self._out_of_range_reconciliations = []
+            for rec in all_recs:
+                if rec.bank_id in in_range_bank_ids:
+                    self.reconciliations.append(rec)
+                else:
+                    self._out_of_range_reconciliations.append(rec)
+                    skipped_recs += 1
+
+            self.rejected_pairings = []
+            self._out_of_range_rejected = []
+            for rp in all_rejected:
+                if rp['bank_id'] in in_range_bank_ids:
+                    self.rejected_pairings.append(rp)
+                else:
+                    self._out_of_range_rejected.append(rp)
+                    skipped_rejected += 1
 
             self._rebuild_lookups()
 
@@ -777,18 +808,29 @@ class ReconciliationSystem:
                 if entry.id in self._reconciled_beacon_ids:
                     entry.matched = True
 
-            print(f"Loaded state: {len(self.reconciliations)} reconciliations, "
-                  f"{len(self.rejected_pairings)} rejected pairings")
+            msg = (f"Loaded state: {len(self.reconciliations)} reconciliations, "
+                   f"{len(self.rejected_pairings)} rejected pairings")
+            if skipped_recs or skipped_rejected:
+                msg += (f" (skipped {skipped_recs} reconciliations, "
+                        f"{skipped_rejected} rejected outside date range)")
+            print(msg)
 
         except (json.JSONDecodeError, KeyError) as e:
             print(f"Warning: Could not load state: {e}")
 
     def save_state(self):
-        """Save current state to v2 JSON file."""
+        """Save current state to v2 JSON file.
+
+        Merges back any out-of-range entries that were skipped during load
+        so they are preserved for future sessions with different date ranges.
+        """
+        all_recs = self.reconciliations + self._out_of_range_reconciliations
+        all_rejected = self.rejected_pairings + self._out_of_range_rejected
+
         state = {
             'version': VERSION,
-            'reconciliations': [r.to_dict() for r in self.reconciliations],
-            'rejected_pairings': self.rejected_pairings
+            'reconciliations': [r.to_dict() for r in all_recs],
+            'rejected_pairings': all_rejected
         }
 
         with open(self.state_file, 'w', encoding='utf-8') as f:
@@ -1754,7 +1796,11 @@ class ReconciliationSystem:
     # -------------------------------------------------------------------
 
     def get_beacon_entries_for_member(self, member_name: str) -> List[BeaconEntry]:
-        """Get all beacon entries where member_1 matches the given name.
+        """Get all beacon entries where member_1 or member_2 matches the given name.
+
+        Matches by:
+        1. Direct name comparison (forename+surname, case-insensitive)
+        2. If member_1/member_2 is a member number, look it up and compare the name
 
         Args:
             member_name: The member name to match (forename+surname, case-insensitive)
@@ -1764,10 +1810,37 @@ class ReconciliationSystem:
         if not member_name:
             return []
         name_upper = member_name.replace(' ', '').upper()
+
+        # Also find the member number for this name, so we can match by number
+        member_numbers = set()
+        for mem_no, info in self.member_lookup.items():
+            full = (info['forename'] + info['surname']).replace(' ', '').upper()
+            if full == name_upper:
+                member_numbers.add(mem_no)
+
         results = []
         for beacon in self.beacon_entries:
-            m1 = beacon.member_1.replace(' ', '').upper()
-            if m1 and m1 == name_upper:
+            matched = False
+            for field_val in [beacon.member_1, beacon.member_2]:
+                if not field_val:
+                    continue
+                fv = field_val.replace(' ', '').upper()
+                # Direct name match
+                if fv == name_upper:
+                    matched = True
+                    break
+                # Member number match
+                if field_val.strip() in member_numbers:
+                    matched = True
+                    break
+                # field_val might be a member number - look it up
+                member_info = self.member_lookup.get(field_val.strip())
+                if member_info:
+                    lookup_name = (member_info['forename'] + member_info['surname']).replace(' ', '').upper()
+                    if lookup_name == name_upper:
+                        matched = True
+                        break
+            if matched:
                 results.append(beacon)
         results.sort(key=lambda b: b.date)
         return results
