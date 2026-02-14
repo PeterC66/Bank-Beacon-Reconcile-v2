@@ -60,6 +60,7 @@ class BankTransaction:
     description: str
     amount: Decimal
     raw_data: Dict = field(default_factory=dict)
+    mem_nos: List[str] = field(default_factory=list)  # Resolved member numbers
 
     def to_dict(self) -> Dict:
         return {
@@ -96,6 +97,8 @@ class BeaconEntry:
     payment_method: str = ""
     raw_data: Dict = field(default_factory=dict)
     matched: bool = False
+    mem_no_1: str = ""  # Resolved numeric member number for member_1
+    mem_no_2: str = ""  # Resolved numeric member number for member_2
 
     def to_dict(self) -> Dict:
         return {
@@ -324,7 +327,9 @@ class ReconciliationSystem:
         else:
             self.beacon_entries = self._load_beacon_entries()
             self._load_member_lookup()
+        self._resolve_member_numbers()
         self._load_state()
+        self._backfill_beacon_mem_nos()
         self._rebuild_indices()
 
     def _parse_bank_date(self, date_str: str) -> datetime:
@@ -433,6 +438,104 @@ class ReconciliationSystem:
                     print(f"Warning: Could not parse member lookup row: {e}")
 
         print(f"Loaded {len(self.member_lookup)} member lookup entries")
+
+    # -------------------------------------------------------------------
+    # Member number resolution
+    # -------------------------------------------------------------------
+
+    TITLE_PREFIXES = {'MR', 'MRS', 'MS', 'MISS', 'DR', 'PROF', 'REV', 'SIR', 'LADY', 'LORD'}
+
+    def _strip_titles(self, name: str) -> str:
+        """Strip title prefixes (MR, MRS, etc.) from a name string."""
+        parts = name.strip().split()
+        while parts and parts[0].upper().rstrip('.') in self.TITLE_PREFIXES:
+            parts.pop(0)
+        return ''.join(parts)
+
+    def _build_name_to_memno_lookup(self) -> Dict[str, str]:
+        """Build a reverse lookup: normalised 'ForenameSurname' -> mem_no."""
+        lookup = {}
+        for mem_no, info in self.member_lookup.items():
+            name = (info['forename'] + info['surname']).replace(' ', '').upper()
+            if name:
+                lookup[name] = mem_no
+            # Also add known_as variant
+            known_as = info.get('known_as', '').strip()
+            if known_as:
+                alt_name = (known_as + info['surname']).replace(' ', '').upper()
+                if alt_name and alt_name not in lookup:
+                    lookup[alt_name] = mem_no
+        return lookup
+
+    def _resolve_name_to_memno(self, member_name: str,
+                                name_to_memno: Dict[str, str]) -> str:
+        """Resolve a member name (ForenameSurname) to a member number.
+        Strips titles before matching."""
+        if not member_name:
+            return ""
+        cleaned = self._strip_titles(member_name).replace(' ', '').upper()
+        return name_to_memno.get(cleaned, "")
+
+    def _resolve_member_numbers(self):
+        """Resolve member numbers on all bank and beacon entries.
+
+        For bank entries: extract member numbers from description.
+        For beacon entries: reverse-lookup member_1/member_2 names to numbers.
+        """
+        name_to_memno = self._build_name_to_memno_lookup()
+
+        # Bank entries: extract member numbers from description
+        for bank in self.bank_transactions:
+            bank.mem_nos = self.extract_member_numbers(bank.description)
+
+        # Beacon entries: resolve member_1/member_2 text names to numbers
+        resolved_count = 0
+        for beacon in self.beacon_entries:
+            if beacon.member_1:
+                mem_no = self._resolve_name_to_memno(beacon.member_1, name_to_memno)
+                if mem_no:
+                    beacon.mem_no_1 = mem_no
+                    resolved_count += 1
+            if beacon.member_2:
+                mem_no = self._resolve_name_to_memno(beacon.member_2, name_to_memno)
+                if mem_no:
+                    beacon.mem_no_2 = mem_no
+                    resolved_count += 1
+
+        print(f"Resolved {resolved_count} beacon member names to member numbers")
+
+    def _backfill_beacon_mem_nos(self):
+        """After state is loaded, backfill beacon mem_nos from reconciled bank entries.
+
+        If a beacon has no mem_no_1 but is reconciled with a bank entry that has
+        a known member number, set mem_no_1 from the bank.
+        """
+        if not self.reconciliations:
+            return
+
+        bank_by_id = {b.id: b for b in self.bank_transactions}
+        beacon_by_id = {b.id: b for b in self.beacon_entries}
+        backfilled = 0
+
+        for rec in self.reconciliations:
+            if rec.status == 'manually_resolved':
+                continue
+            bank = bank_by_id.get(rec.bank_id)
+            if not bank or not bank.mem_nos:
+                continue
+            for beacon_id in rec.beacon_ids:
+                beacon = beacon_by_id.get(beacon_id)
+                if not beacon:
+                    continue
+                if not beacon.mem_no_1 and len(bank.mem_nos) >= 1:
+                    beacon.mem_no_1 = bank.mem_nos[0]
+                    backfilled += 1
+                if not beacon.mem_no_2 and len(bank.mem_nos) >= 2:
+                    beacon.mem_no_2 = bank.mem_nos[1]
+                    backfilled += 1
+
+        if backfilled:
+            print(f"Backfilled {backfilled} beacon member numbers from reconciled bank entries")
 
     # -------------------------------------------------------------------
     # Excel backup file loading
@@ -1183,32 +1286,30 @@ class ReconciliationSystem:
 
     def _calculate_member_match_score(self, bank_txn: BankTransaction,
                                        beacon: BeaconEntry) -> float:
-        """Check if a beacon matches via member number from bank description.
+        """Check if a beacon matches via member number.
 
-        Returns score > 0 if there's a member match, 0 otherwise.
-        Checks both member_1 and member_2 fields on beacon.
+        Uses pre-resolved numeric member numbers on both bank and beacon
+        entries. Returns 0.95 if any bank mem_no matches any beacon mem_no.
         """
-        member_numbers = self.extract_member_numbers(bank_txn.description)
-        valid_numbers = [n for n in member_numbers if self.lookup_member(n) is not None]
-
-        if not valid_numbers:
+        if not bank_txn.mem_nos:
             return 0.0
 
-        for num in valid_numbers:
-            member = self.lookup_member(num)
-            if not member:
-                continue
-            full_name = (member['forename'] + member['surname']).replace(' ', '').upper()
+        # Only consider valid member numbers (ones in the lookup)
+        valid_bank_nos = {n for n in bank_txn.mem_nos if n in self.member_lookup}
+        if not valid_bank_nos:
+            return 0.0
 
-            # Check member_1
-            m1 = beacon.member_1.replace(' ', '').upper()
-            if m1 and m1 == full_name:
-                return 0.95
+        beacon_nos = set()
+        if beacon.mem_no_1:
+            beacon_nos.add(beacon.mem_no_1)
+        if beacon.mem_no_2:
+            beacon_nos.add(beacon.mem_no_2)
 
-            # Check member_2
-            m2 = beacon.member_2.replace(' ', '').upper()
-            if m2 and m2 == full_name:
-                return 0.95
+        if not beacon_nos:
+            return 0.0
+
+        if valid_bank_nos & beacon_nos:
+            return 0.95
 
         return 0.0
 
@@ -1789,6 +1890,40 @@ class ReconciliationSystem:
                     (rec, f"Amount mismatch: Bank {chr(163)}{bank.amount} != Beacon total {chr(163)}{beacon_total}")
                 )
 
+        # Check 4: Member number consistency
+        for rec in self.reconciliations:
+            if rec.status == 'manually_resolved':
+                continue
+            bank = bank_by_id.get(rec.bank_id)
+            if not bank or not bank.mem_nos:
+                continue
+            valid_bank_nos = {n for n in bank.mem_nos if n in self.member_lookup}
+            if not valid_bank_nos:
+                continue
+            for bid in rec.beacon_ids:
+                beacon = beacon_by_id.get(bid)
+                if not beacon:
+                    continue
+                beacon_nos = set()
+                if beacon.mem_no_1:
+                    beacon_nos.add(beacon.mem_no_1)
+                if beacon.mem_no_2:
+                    beacon_nos.add(beacon.mem_no_2)
+                if beacon_nos and not (valid_bank_nos & beacon_nos):
+                    bank_names = [f"#{n} ({self.member_lookup[n]['forename']} {self.member_lookup[n]['surname']})"
+                                  for n in valid_bank_nos]
+                    beacon_names = []
+                    for bn in beacon_nos:
+                        info = self.member_lookup.get(bn)
+                        if info:
+                            beacon_names.append(f"#{bn} ({info['forename']} {info['surname']})")
+                        else:
+                            beacon_names.append(f"#{bn}")
+                    inconsistencies.append(
+                        (rec, f"Member mismatch: Bank has {', '.join(bank_names)} "
+                              f"but beacon {bid} has {', '.join(beacon_names)}")
+                    )
+
         return inconsistencies
 
     # -------------------------------------------------------------------
@@ -1796,52 +1931,43 @@ class ReconciliationSystem:
     # -------------------------------------------------------------------
 
     def get_beacon_entries_for_member(self, member_name: str) -> List[BeaconEntry]:
-        """Get all beacon entries where member_1 or member_2 matches the given name.
-
-        Matches by:
-        1. Direct name comparison (forename+surname, case-insensitive)
-        2. If member_1/member_2 is a member number, look it up and compare the name
+        """Get all beacon entries matching a member, using numeric member numbers.
 
         Args:
-            member_name: The member name to match (forename+surname, case-insensitive)
+            member_name: The member name (forename+surname format)
 
         Returns list of BeaconEntry sorted by date.
         """
         if not member_name:
             return []
-        name_upper = member_name.replace(' ', '').upper()
 
-        # Also find the member number for this name, so we can match by number
-        member_numbers = set()
-        for mem_no, info in self.member_lookup.items():
-            full = (info['forename'] + info['surname']).replace(' ', '').upper()
-            if full == name_upper:
-                member_numbers.add(mem_no)
+        # Resolve the name to a member number
+        name_to_memno = self._build_name_to_memno_lookup()
+        cleaned = self._strip_titles(member_name).replace(' ', '').upper()
+        target_mem_no = name_to_memno.get(cleaned, "")
+
+        if not target_mem_no:
+            return []
 
         results = []
         for beacon in self.beacon_entries:
-            matched = False
-            for field_val in [beacon.member_1, beacon.member_2]:
-                if not field_val:
-                    continue
-                fv = field_val.replace(' ', '').upper()
-                # Direct name match
-                if fv == name_upper:
-                    matched = True
-                    break
-                # Member number match
-                if field_val.strip() in member_numbers:
-                    matched = True
-                    break
-                # field_val might be a member number - look it up
-                member_info = self.member_lookup.get(field_val.strip())
-                if member_info:
-                    lookup_name = (member_info['forename'] + member_info['surname']).replace(' ', '').upper()
-                    if lookup_name == name_upper:
-                        matched = True
-                        break
-            if matched:
+            if beacon.mem_no_1 == target_mem_no or beacon.mem_no_2 == target_mem_no:
                 results.append(beacon)
+        results.sort(key=lambda b: b.date)
+        return results
+
+    def get_beacon_entries_for_member_no(self, mem_no: str) -> List[BeaconEntry]:
+        """Get all beacon entries matching a member number.
+
+        Args:
+            mem_no: The numeric member number to match.
+
+        Returns list of BeaconEntry sorted by date.
+        """
+        if not mem_no:
+            return []
+        results = [b for b in self.beacon_entries
+                   if b.mem_no_1 == mem_no or b.mem_no_2 == mem_no]
         results.sort(key=lambda b: b.date)
         return results
 

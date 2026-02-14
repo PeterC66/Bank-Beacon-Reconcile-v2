@@ -518,11 +518,11 @@ class ReconciliationGUI:
         self.member_tree.heading('payee', text='Payee')
         self.member_tree.heading('status', text='Status')
 
-        self.member_tree.column('trans_no', width=80, minwidth=60)
-        self.member_tree.column('date', width=90, minwidth=70)
-        self.member_tree.column('amount', width=80, minwidth=60)
-        self.member_tree.column('payee', width=200, minwidth=100)
-        self.member_tree.column('status', width=120, minwidth=80)
+        self.member_tree.column('trans_no', width=65, minwidth=50)
+        self.member_tree.column('date', width=75, minwidth=65)
+        self.member_tree.column('amount', width=65, minwidth=50)
+        self.member_tree.column('payee', width=180, minwidth=80)
+        self.member_tree.column('status', width=110, minwidth=70)
 
         tree_scroll = ttk.Scrollbar(tree_frame, orient='vertical',
                                      command=self.member_tree.yview)
@@ -530,9 +530,11 @@ class ReconciliationGUI:
         self.member_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Tag for reconciled rows
+        # Tags for row styling (reconciled/unreconciled x odd/even)
         self.member_tree.tag_configure('reconciled', foreground='#006600')
         self.member_tree.tag_configure('unreconciled', foreground='#333333')
+        self.member_tree.tag_configure('reconciled_alt', foreground='#006600', background='#F0F0F0')
+        self.member_tree.tag_configure('unreconciled_alt', foreground='#333333', background='#F0F0F0')
 
         # Bind click
         self.member_tree.bind('<Double-1>', self._on_member_tree_click)
@@ -552,83 +554,81 @@ class ReconciliationGUI:
         if not bank:
             return
 
-        # Determine which member(s) to show
-        member_names = []
+        # Determine which member number(s) to show
+        mem_nos = []  # Resolved numeric member numbers
         source_label = ""
 
         # Check if we have a beacon candidate or reconciled beacon
         rec = self.system.get_reconciliation_for_bank(bank.id)
         if rec and rec.status != 'manually_resolved' and rec.beacon_ids:
-            # Reconciled - use beacon's member_1
+            # Reconciled - use beacon's resolved mem_nos
             beacons = self.system.get_beacon_entries_for_reconciliation(rec)
             for b in beacons:
-                if b.member_1 and b.member_1 not in member_names:
-                    member_names.append(b.member_1)
-                if b.member_2 and b.member_2 not in member_names:
-                    member_names.append(b.member_2)
-            # Fall back to bank description if beacons have no member fields
-            if not member_names:
-                member_names = self._get_member_names_from_bank(bank)
-                if member_names:
-                    source_label = " (from bank description)"
+                if b.mem_no_1 and b.mem_no_1 not in mem_nos:
+                    mem_nos.append(b.mem_no_1)
+                if b.mem_no_2 and b.mem_no_2 not in mem_nos:
+                    mem_nos.append(b.mem_no_2)
         elif rec and rec.status == 'manually_resolved':
-            # Manually resolved - use bank-derived member
-            member_names = self._get_member_names_from_bank(bank)
-            if member_names:
-                source_label = " (from bank description)"
+            pass  # Will fall through to bank mem_nos below
         elif self.beacon_search_active:
             # Beacon search active - use member from displayed search result
             if (self.beacon_search_results and
                     0 <= self.candidate_index < len(self.beacon_search_results)):
                 beacon = self.beacon_search_results[self.candidate_index]
-                if beacon.member_1 and beacon.member_1 not in member_names:
-                    member_names.append(beacon.member_1)
-                if beacon.member_2 and beacon.member_2 not in member_names:
-                    member_names.append(beacon.member_2)
+                if beacon.mem_no_1 and beacon.mem_no_1 not in mem_nos:
+                    mem_nos.append(beacon.mem_no_1)
+                if beacon.mem_no_2 and beacon.mem_no_2 not in mem_nos:
+                    mem_nos.append(beacon.mem_no_2)
         else:
-            # Not reconciled - use current candidate's member_1
+            # Not reconciled - use current candidate's mem_nos
             candidate = self._current_candidate()
             if candidate:
                 for b in candidate.beacon_entries:
-                    if b.member_1 and b.member_1 not in member_names:
-                        member_names.append(b.member_1)
-                    if b.member_2 and b.member_2 not in member_names:
-                        member_names.append(b.member_2)
-            else:
-                # No candidate either - fall back to bank-derived member
-                member_names = self._get_member_names_from_bank(bank)
-                if member_names:
-                    source_label = " (from bank description)"
+                    if b.mem_no_1 and b.mem_no_1 not in mem_nos:
+                        mem_nos.append(b.mem_no_1)
+                    if b.mem_no_2 and b.mem_no_2 not in mem_nos:
+                        mem_nos.append(b.mem_no_2)
 
-        if not member_names:
+        # Fall back to bank entry's mem_nos if nothing from beacons
+        if not mem_nos and bank.mem_nos:
+            valid = [n for n in bank.mem_nos if n in self.system.member_lookup]
+            mem_nos = valid
+            if mem_nos:
+                source_label = " (from bank description)"
+
+        if not mem_nos:
             self.member_panel_header.config(text="No member identified")
             return
 
-        # Build header
+        # Build header from member numbers
         header_parts = []
-        for name in member_names:
-            # Try to find a readable name from member_lookup
-            readable = self._get_readable_member_name(name)
-            if readable:
-                header_parts.append(f"{readable} [{name}]")
+        for num in mem_nos:
+            info = self.system.member_lookup.get(num)
+            if info:
+                header_parts.append(f"{info['forename']} {info['surname']} (#{num})")
             else:
-                header_parts.append(name)
+                header_parts.append(f"#{num}")
         self.member_panel_header.config(
             text=", ".join(header_parts) + source_label
         )
 
         # Populate tree with all beacon entries for these members
-        for member_name in member_names:
-            beacons = self.system.get_beacon_entries_for_member(member_name)
+        seen_beacon_ids = set()
+        row_num = 0
+        for mem_no in mem_nos:
+            beacons = self.system.get_beacon_entries_for_member_no(mem_no)
             for beacon in beacons:
+                if beacon.id in seen_beacon_ids:
+                    continue
+                seen_beacon_ids.add(beacon.id)
                 # Determine reconciled status
                 bank_id = self.system.get_bank_id_for_beacon(beacon.id)
                 if bank_id:
                     status = f"Reconciled ({bank_id})"
-                    tag = 'reconciled'
+                    tag = 'reconciled_alt' if row_num % 2 else 'reconciled'
                 else:
                     status = "Un-reconciled"
-                    tag = 'unreconciled'
+                    tag = 'unreconciled_alt' if row_num % 2 else 'unreconciled'
 
                 item_id = self.member_tree.insert('', 'end', values=(
                     beacon.trans_no,
@@ -638,26 +638,7 @@ class ReconciliationGUI:
                     status
                 ), tags=(tag,))
                 self._member_tree_beacon_ids[item_id] = (beacon.id, bank_id)
-
-    def _get_member_names_from_bank(self, bank: BankTransaction) -> list:
-        """Get member names (forename+surname format) from bank description via lookup."""
-        member_numbers = self.system.extract_member_numbers(bank.description)
-        names = []
-        for num in member_numbers:
-            member = self.system.lookup_member(num)
-            if member:
-                name = member['forename'] + member['surname']
-                if name not in names:
-                    names.append(name)
-        return names
-
-    def _get_readable_member_name(self, member_code: str) -> str:
-        """Try to find a readable name and number for a member code like 'SmithJ'."""
-        for mem_no, info in self.system.member_lookup.items():
-            full = info['forename'] + info['surname']
-            if full.replace(' ', '').upper() == member_code.replace(' ', '').upper():
-                return f"{info['forename']} {info['surname']} (#{mem_no})"
-        return ""
+                row_num += 1
 
     def _on_member_tree_click(self, event):
         """Handle double-click on a row in the member transactions tree."""

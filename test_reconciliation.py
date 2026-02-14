@@ -671,6 +671,133 @@ def test_cheque_matching():
     print("PASSED")
 
 
+def test_member_number_resolution():
+    """Test numeric member number resolution, title stripping, and scoring."""
+    print("\n=== Test: Member Number Resolution ===")
+
+    from datetime import datetime
+
+    system = make_system()
+
+    # --- Test _strip_titles ---
+    assert system._strip_titles("MR JohnSmith") == "JohnSmith"
+    assert system._strip_titles("MRS JaneSmith") == "JaneSmith"
+    assert system._strip_titles("Mr. JohnSmith") == "JohnSmith"
+    assert system._strip_titles("DR PROF JohnSmith") == "JohnSmith"
+    assert system._strip_titles("JohnSmith") == "JohnSmith"
+    assert system._strip_titles("") == ""
+    print("  _strip_titles: PASSED")
+
+    # --- Test _build_name_to_memno_lookup ---
+    # member_lookup loaded from member_lookup.csv has entries like:
+    #   823: forename=L, surname=Leonard
+    #   1679: forename=Virginia, surname=Wykes, known_as=Ginny
+    lookup = system._build_name_to_memno_lookup()
+    assert lookup.get('LLEONARD') == '823', f"Expected 823, got {lookup.get('LLEONARD')}"
+    assert lookup.get('VIRGINIAWYKES') == '1679'
+    assert lookup.get('GINNYWYKES') == '1679'  # known_as variant
+    print(f"  _build_name_to_memno_lookup: {len(lookup)} entries, PASSED")
+
+    # --- Test _resolve_name_to_memno ---
+    assert system._resolve_name_to_memno("LLeonard", lookup) == '823'
+    assert system._resolve_name_to_memno("VirginiaWykes", lookup) == '1679'
+    assert system._resolve_name_to_memno("GinnyWykes", lookup) == '1679'
+    assert system._resolve_name_to_memno("MRS VirginiaWykes", lookup) == '1679'
+    assert system._resolve_name_to_memno("MR LLeonard", lookup) == '823'
+    assert system._resolve_name_to_memno("UnknownPerson", lookup) == ''
+    assert system._resolve_name_to_memno("", lookup) == ''
+    print("  _resolve_name_to_memno: PASSED")
+
+    # --- Test _resolve_member_numbers on beacon entries ---
+    # Create beacon entries with known member names and inject them
+    original_beacons = system.beacon_entries[:]
+    test_beacon_1 = BeaconEntry(
+        id="TEST_MEM_1", date=datetime(2025, 1, 15),
+        trans_no="M001", payee="Test", detail="",
+        amount=Decimal("10.00"), member_1="LLeonard"
+    )
+    test_beacon_2 = BeaconEntry(
+        id="TEST_MEM_2", date=datetime(2025, 1, 16),
+        trans_no="M002", payee="Test2", detail="",
+        amount=Decimal("20.00"), member_1="VirginiaWykes", member_2="BarbaraDuke"
+    )
+    test_beacon_3 = BeaconEntry(
+        id="TEST_MEM_3", date=datetime(2025, 1, 17),
+        trans_no="M003", payee="Test3", detail="",
+        amount=Decimal("30.00"), member_1="MRS GinnyWykes"
+    )
+    system.beacon_entries = [test_beacon_1, test_beacon_2, test_beacon_3]
+    system._resolve_member_numbers()
+
+    assert test_beacon_1.mem_no_1 == '823', f"Expected 823, got {test_beacon_1.mem_no_1}"
+    assert test_beacon_2.mem_no_1 == '1679', f"Expected 1679, got {test_beacon_2.mem_no_1}"
+    assert test_beacon_2.mem_no_2 == '1783', f"Expected 1783, got {test_beacon_2.mem_no_2}"
+    assert test_beacon_3.mem_no_1 == '1679', f"Expected 1679 (via MRS Ginny), got {test_beacon_3.mem_no_1}"
+    print("  _resolve_member_numbers: PASSED")
+
+    # --- Test _calculate_member_match_score ---
+    bank_with_mem = BankTransaction(
+        id="TEST_B1", date=datetime(2025, 1, 15),
+        type="DEB", description="LEONARD 823 PAYMENT",
+        amount=Decimal("10.00"), mem_nos=['823']
+    )
+    # Score should be high when bank mem_no matches beacon mem_no
+    score = system._calculate_member_match_score(bank_with_mem, test_beacon_1)
+    assert score == 0.95, f"Expected 0.95, got {score}"
+
+    # Score should be 0 when no match
+    score_no_match = system._calculate_member_match_score(bank_with_mem, test_beacon_2)
+    assert score_no_match == 0.0, f"Expected 0.0, got {score_no_match}"
+
+    # Bank with no mem_nos
+    bank_no_mem = BankTransaction(
+        id="TEST_B2", date=datetime(2025, 1, 15),
+        type="DEB", description="SOME PAYMENT",
+        amount=Decimal("10.00"), mem_nos=[]
+    )
+    score_empty = system._calculate_member_match_score(bank_no_mem, test_beacon_1)
+    assert score_empty == 0.0
+    print("  _calculate_member_match_score: PASSED")
+
+    # --- Test get_beacon_entries_for_member_no ---
+    results = system.get_beacon_entries_for_member_no('1679')
+    assert len(results) == 2, f"Expected 2, got {len(results)}"
+    assert results[0].id == "TEST_MEM_2"
+    assert results[1].id == "TEST_MEM_3"
+
+    results_823 = system.get_beacon_entries_for_member_no('823')
+    assert len(results_823) == 1
+    assert results_823[0].id == "TEST_MEM_1"
+
+    results_empty = system.get_beacon_entries_for_member_no('')
+    assert len(results_empty) == 0
+    print("  get_beacon_entries_for_member_no: PASSED")
+
+    # --- Test _backfill_beacon_mem_nos ---
+    test_beacon_blank = BeaconEntry(
+        id="TEST_MEM_BF", date=datetime(2025, 1, 15),
+        trans_no="M004", payee="No member text", detail="",
+        amount=Decimal("10.00")
+    )
+    system.beacon_entries.append(test_beacon_blank)
+    system.reconciliations.append(Reconciliation(
+        bank_id="TEST_B1", beacon_ids=["TEST_MEM_BF"],
+        match_type="1-to-1", status="reconciled"
+    ))
+    system.bank_transactions.append(bank_with_mem)
+    system._backfill_beacon_mem_nos()
+    assert test_beacon_blank.mem_no_1 == '823', \
+        f"Backfill should set mem_no_1 to 823, got {test_beacon_blank.mem_no_1}"
+    print("  _backfill_beacon_mem_nos: PASSED")
+
+    # Restore original state
+    system.beacon_entries = original_beacons
+    system.reconciliations = [r for r in system.reconciliations if r.bank_id != "TEST_B1"]
+    system.bank_transactions = [b for b in system.bank_transactions if b.id != "TEST_B1"]
+
+    print("PASSED")
+
+
 def test_excel_backup_loading():
     """Test loading beacon entries and member lookup from Excel backup file."""
     print("\n=== Test: Excel Backup Loading ===")
@@ -790,6 +917,7 @@ def run_all_tests():
     test_amount_search_ignores_sign()
     test_date_range_filter()
     test_cheque_matching()
+    test_member_number_resolution()
     test_excel_backup_loading()
 
     # Final cleanup
