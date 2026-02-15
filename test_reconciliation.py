@@ -722,8 +722,8 @@ def test_member_number_resolution():
     assert system._resolve_name_to_memno("V. Wykes", lookup) == '1679'
     # known_as initial: "G. Wykes" should match Ginny Wykes via known_as
     assert system._resolve_name_to_memno("G. Wykes", lookup) == '1679'
-    # No matching initial: "X. Wykes" should not match
-    assert system._resolve_name_to_memno("X. Wykes", lookup) == ''
+    # No matching initial but unique surname: "X. Wykes" resolves via surname-only fallback
+    assert system._resolve_name_to_memno("X. Wykes", lookup) == '1679'
     # Joined initial+surname: "B. Duke" should match Barbara Duke
     assert system._resolve_name_to_memno("B. Duke", lookup) == '1783'
     print("  _resolve_name_to_memno (with periods + initial fallback): PASSED")
@@ -842,9 +842,9 @@ def test_member_number_resolution():
         trans_no="M006", payee="Dup", detail="",
         amount=Decimal("5.00"), member_1="X. Leonard"
     )
-    # X. Leonard matches no forename initial, so "not recognised"
+    # X. Leonard matches no forename initial but 2 Leonards exist, so "2 with surname"
     display_dup = system.get_beacon_member_display(dup, 1)
-    assert "not recognised" in display_dup, f"Got: {display_dup}"
+    assert "2 with surname" in display_dup, f"Got: {display_dup}"
     # But if we use an ambiguous initial... no forename starts with X
     # Let's test with "Leonard" (initial "L") - now 2 Leonards: L Leonard and Bob Leonard?
     # Actually L matches L Leonard (823) but not Bob Leonard (9001). So single match.
@@ -926,6 +926,283 @@ def test_ignored_inconsistencies():
     # Clean up
     system2.ignored_inconsistencies = []
     system2.save_state()
+
+    print("PASSED")
+
+
+def test_memno_aliases():
+    """Test member number alias loading, chain resolution, and cycle detection."""
+    print("\n=== Test: Memno Aliases ===")
+
+    from datetime import datetime
+    import tempfile
+
+    system = make_system()
+
+    # Create a temp aliases file
+    alias_file = os.path.join(CODE_DIR, 'memno_aliases.csv')
+    try:
+        with open(alias_file, 'w', newline='', encoding='utf-8') as f:
+            f.write("old_memno,new_memno\n")
+            f.write("100,200\n")      # Simple alias
+            f.write("200,300\n")      # Chain: 100->200->300
+            f.write("400,500\n")      # Another simple alias
+
+        system._load_memno_aliases()
+
+        # Chain resolution: 100 should resolve to 300
+        assert system.resolve_memno_alias('100') == '300', \
+            f"Expected 300, got {system.resolve_memno_alias('100')}"
+        # 200 should resolve to 300
+        assert system.resolve_memno_alias('200') == '300', \
+            f"Expected 300, got {system.resolve_memno_alias('200')}"
+        # 300 is the canonical - no alias
+        assert system.resolve_memno_alias('300') == '300'
+        # 400 -> 500
+        assert system.resolve_memno_alias('400') == '500'
+        # Unknown memno is unchanged
+        assert system.resolve_memno_alias('999') == '999'
+        print("  Chain resolution: PASSED")
+
+        # Test apply to entries
+        bank = BankTransaction(
+            id="TEST_ALIAS_B", date=datetime(2025, 1, 15),
+            type="DEB", description="Test", amount=Decimal("10.00"),
+            mem_nos=['100', '400']
+        )
+        beacon = BeaconEntry(
+            id="TEST_ALIAS_E", date=datetime(2025, 1, 15),
+            trans_no="A001", payee="Test", detail="",
+            amount=Decimal("10.00"), mem_no_1="200", mem_no_2="400"
+        )
+        system.bank_transactions.append(bank)
+        system.beacon_entries.append(beacon)
+        system._apply_memno_aliases()
+        assert bank.mem_nos == ['300', '500'], f"Got {bank.mem_nos}"
+        assert beacon.mem_no_1 == '300', f"Got {beacon.mem_no_1}"
+        assert beacon.mem_no_2 == '500', f"Got {beacon.mem_no_2}"
+        print("  Apply aliases: PASSED")
+
+        # Clean up test entries
+        system.bank_transactions = [b for b in system.bank_transactions if b.id != "TEST_ALIAS_B"]
+        system.beacon_entries = [b for b in system.beacon_entries if b.id != "TEST_ALIAS_E"]
+
+        # Test cycle detection
+        with open(alias_file, 'w', newline='', encoding='utf-8') as f:
+            f.write("old_memno,new_memno\n")
+            f.write("10,20\n")
+            f.write("20,30\n")
+            f.write("30,10\n")  # Cycle!
+
+        system._load_memno_aliases()
+        # Should not crash, cycle detected
+        # The resolved value depends on which entry is processed first but shouldn't loop
+        print("  Cycle detection (no crash): PASSED")
+
+    finally:
+        if os.path.exists(alias_file):
+            os.remove(alias_file)
+
+    print("PASSED")
+
+
+def test_confusable_members():
+    """Test confusable members config and warning display."""
+    print("\n=== Test: Confusable Members ===")
+
+    from datetime import datetime
+
+    system = make_system()
+
+    # Set up confusable members in config
+    system.config['confusable_members'] = [['823', '1679']]
+    system._load_confusable_members()
+
+    assert system.is_confusable_member('823')
+    assert system.is_confusable_member('1679')
+    assert not system.is_confusable_member('1783')
+    print("  is_confusable_member: PASSED")
+
+    warning_823 = system.get_confusable_warning('823')
+    assert '#1679' in warning_823, f"Got: {warning_823}"
+    warning_1679 = system.get_confusable_warning('1679')
+    assert '#823' in warning_1679, f"Got: {warning_1679}"
+    warning_none = system.get_confusable_warning('1783')
+    assert warning_none == '', f"Got: {warning_none}"
+    print("  get_confusable_warning: PASSED")
+
+    # Test display with confusable warning
+    beacon = BeaconEntry(
+        id="TEST_CONF", date=datetime(2025, 1, 15),
+        trans_no="C001", payee="Test", detail="",
+        amount=Decimal("10.00"), member_1="LLeonard", mem_no_1="823"
+    )
+    display = system.get_beacon_member_display(beacon, 1)
+    assert '\u26a0' in display, f"Expected warning symbol, got: {display}"
+    assert '#1679' in display, f"Expected confusable memno ref, got: {display}"
+    print("  Display with confusable warning: PASSED")
+
+    # Clean up
+    system.config.pop('confusable_members', None)
+    system._load_confusable_members()
+
+    print("PASSED")
+
+
+def test_new_reports():
+    """Test inconsistencies and unresolved memno reports."""
+    print("\n=== Test: New Reports ===")
+
+    from datetime import datetime
+
+    system = make_system()
+    system.auto_reconcile()
+
+    # Test inconsistencies report
+    inconsistencies_path = os.path.join(DATA_DIR, "_test_inconsistencies.csv")
+    r1 = system.export_inconsistencies_csv(inconsistencies_path)
+    assert os.path.exists(inconsistencies_path)
+    print(f"  Inconsistencies report: {r1} rows")
+    os.remove(inconsistencies_path)
+
+    # Test unresolved memno report
+    unresolved_path = os.path.join(DATA_DIR, "_test_unresolved_memno.csv")
+    r2 = system.export_unresolved_memno_csv(unresolved_path)
+    assert os.path.exists(unresolved_path)
+    print(f"  Unresolved memno report: {r2} rows")
+    os.remove(unresolved_path)
+
+    print("PASSED")
+
+
+def test_memno_search():
+    """Test #memno search for bank and beacon entries."""
+    print("\n=== Test: #Memno Search ===")
+
+    from datetime import datetime
+
+    system = make_system()
+
+    # Add test entries with known mem_nos
+    bank = BankTransaction(
+        id="TEST_SEARCH_B", date=datetime(2025, 1, 15),
+        type="DEB", description="Test 823 payment",
+        amount=Decimal("10.00"), mem_nos=['823']
+    )
+    beacon = BeaconEntry(
+        id="TEST_SEARCH_E", date=datetime(2025, 1, 15),
+        trans_no="S001", payee="Test", detail="",
+        amount=Decimal("10.00"), mem_no_1="823"
+    )
+    system.bank_transactions.append(bank)
+    system.beacon_entries.append(beacon)
+
+    # Bank #memno search
+    results = system.search_bank_entries("#823")
+    assert len(results) >= 1, f"Expected at least 1 result, got {len(results)}"
+    # Check our test bank is in results
+    found = any(system.bank_transactions[i].id == "TEST_SEARCH_B" for i in results)
+    assert found, "Test bank entry not found in #823 search"
+    print(f"  Bank #823 search: {len(results)} results")
+
+    # Beacon #memno search
+    results = system.search_beacon_entries("#823")
+    assert len(results) >= 1
+    found = any(b.id == "TEST_SEARCH_E" for b in results)
+    assert found, "Test beacon entry not found in #823 search"
+    print(f"  Beacon #823 search: {len(results)} results")
+
+    # Non-matching #memno
+    results = system.search_bank_entries("#99999")
+    assert len(results) == 0
+    results = system.search_beacon_entries("#99999")
+    assert len(results) == 0
+    print("  Non-matching #memno: 0 results")
+
+    # Empty #
+    results = system.search_bank_entries("#")
+    assert len(results) == 0
+    print("  Empty # search: 0 results")
+
+    # Clean up
+    system.bank_transactions = [b for b in system.bank_transactions if b.id != "TEST_SEARCH_B"]
+    system.beacon_entries = [b for b in system.beacon_entries if b.id != "TEST_SEARCH_E"]
+
+    print("PASSED")
+
+
+def test_reconciled_comment():
+    """Test adding comments to reconciled (not just resolved) entries."""
+    print("\n=== Test: Reconciled Comment ===")
+
+    system = make_system()
+
+    # Find a bank entry, reconcile it, then add a comment
+    for bank in system.bank_transactions:
+        candidates = system.get_candidates_for_bank(bank)
+        if candidates:
+            success, msg = system.reconcile(bank, candidates[0])
+            assert success, f"Reconcile failed: {msg}"
+
+            # Should be able to add comment to reconciled entry
+            success, msg = system.update_resolved_comment(bank.id, "Test reconciled comment")
+            assert success, f"Add comment failed: {msg}"
+
+            rec = system.get_reconciliation_for_bank(bank.id)
+            assert rec.comment == "Test reconciled comment"
+            assert rec.status == "reconciled"  # Still reconciled, not resolved
+            print(f"  Added comment to reconciled entry: '{rec.comment}'")
+
+            # Update the comment
+            success, msg = system.update_resolved_comment(bank.id, "Updated comment")
+            assert success
+            rec = system.get_reconciliation_for_bank(bank.id)
+            assert rec.comment == "Updated comment"
+            print(f"  Updated comment: '{rec.comment}'")
+            break
+
+    print("PASSED")
+
+
+def test_surname_only_fallback():
+    """Test surname-only fallback for member resolution."""
+    print("\n=== Test: Surname-Only Fallback ===")
+
+    system = make_system()
+    lookup = system._build_name_to_memno_lookup()
+
+    # "B. Duke" -> should resolve to Barbara Duke (1783) via surname+initial
+    assert system._resolve_name_to_memno("B. Duke", lookup) == '1783'
+    print("  B. Duke -> 1783 (surname+initial): PASSED")
+
+    # Test surname-only: add a member with unique surname
+    system.member_lookup['9999'] = {
+        'status': 'current', 'forename': 'Hannah', 'surname': 'Dickinson',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+    # "B. Dickinson" -> initial B doesn't match Hannah, but surname-only has 1 match
+    result = system._resolve_name_to_memno("B. Dickinson", lookup)
+    assert result == '9999', f"Expected 9999 (surname-only), got '{result}'"
+    print("  B. Dickinson -> 9999 (surname-only fallback): PASSED")
+
+    # Add another Dickinson - should NOT resolve (2 matches)
+    system.member_lookup['9998'] = {
+        'status': 'current', 'forename': 'Brian', 'surname': 'Dickinson',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+    # Now "B. Dickinson" should match Brian via surname+initial
+    result = system._resolve_name_to_memno("B. Dickinson", lookup)
+    assert result == '9998', f"Expected 9998 (B matches Brian), got '{result}'"
+    print("  B. Dickinson with Brian -> 9998 (surname+initial): PASSED")
+
+    # "X. Dickinson" -> no initial match, 2 Dickinsons, should not resolve
+    result = system._resolve_name_to_memno("X. Dickinson", lookup)
+    assert result == '', f"Expected '' (ambiguous), got '{result}'"
+    print("  X. Dickinson with 2 Dickinsons -> '' (ambiguous): PASSED")
+
+    # Clean up
+    del system.member_lookup['9999']
+    del system.member_lookup['9998']
 
     print("PASSED")
 
@@ -1051,6 +1328,12 @@ def run_all_tests():
     test_cheque_matching()
     test_member_number_resolution()
     test_ignored_inconsistencies()
+    test_memno_aliases()
+    test_confusable_members()
+    test_new_reports()
+    test_memno_search()
+    test_reconciled_comment()
+    test_surname_only_fallback()
     test_excel_backup_loading()
 
     # Final cleanup

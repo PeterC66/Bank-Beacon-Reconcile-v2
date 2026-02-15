@@ -351,7 +351,7 @@ class ReconciliationGUI:
                                              style='Small.TLabel')
         self.bank_search_result.pack(side=tk.LEFT, padx=5)
         # Search format hint
-        ttk.Label(bank_outer, text='[surname | "exact name" | £12.50 | 17/03/25 | BANK_001]',
+        ttk.Label(bank_outer, text='[surname | "exact name" | £12.50 | 17/03/25 | #memno | BANK_001]',
                   foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     # -------------------------------------------------------------------
@@ -441,7 +441,7 @@ class ReconciliationGUI:
                                                style='Small.TLabel')
         self.beacon_search_result.pack(side=tk.LEFT, padx=5)
         # Search format hint
-        ttk.Label(beacon_search_area, text='[surname | "exact name" | £12.50 | 17/03/25 | 7656 (trans no) | BEACON_001]',
+        ttk.Label(beacon_search_area, text='[surname | "exact name" | £12.50 | 17/03/25 | #memno | 7656 (trans no) | BEACON_001]',
                   foreground='#666666', font=('Segoe UI', 8)).pack(fill=tk.X)
 
     def _create_beacon_entry_widgets(self, frame):
@@ -752,7 +752,7 @@ class ReconciliationGUI:
 
         ttk.Separator(row2, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
 
-        ttk.Label(row2, text="Resolved comment:").pack(side=tk.LEFT, padx=3)
+        ttk.Label(row2, text="Comment:").pack(side=tk.LEFT, padx=3)
         self.resolved_entry = ttk.Entry(row2, width=25)
         self.resolved_entry.pack(side=tk.LEFT, padx=3)
         self.resolved_entry.bind('<Return>', lambda e: self._on_mark_resolved())
@@ -883,7 +883,10 @@ class ReconciliationGUI:
                         )
                     self.reconciled_info_frame.pack(fill=tk.X, pady=(8, 0))
                     self.reconciled_info_label.config(text="\n".join(lines))
-                    self.reconciled_comment_label.config(text="")
+                    comment_text = f"Comment: {rec.comment}  [click to edit]" if rec.comment else "[click to add comment]"
+                    self.reconciled_comment_label.config(
+                        text=comment_text, cursor='hand2'
+                    )
                 else:
                     self.reconciled_info_frame.pack_forget()
         else:
@@ -1398,20 +1401,15 @@ class ReconciliationGUI:
             messagebox.showerror("Error", "Please enter a comment explaining the resolution")
             return
 
-        # Check if already resolved - if so, update the comment
+        # Check if already reconciled/resolved - if so, update the comment
         rec = self.system.get_reconciliation_for_bank(bank.id)
-        if rec and rec.status == 'manually_resolved':
+        if rec:
             success, message = self.system.update_resolved_comment(bank.id, comment)
             if success:
                 self.resolved_entry.delete(0, tk.END)
                 self._update_display()
             else:
                 messagebox.showerror("Update Comment Failed", message)
-            return
-
-        if self.system.is_bank_reconciled(bank.id):
-            messagebox.showerror("Error", "Bank entry is already reconciled.\n"
-                                 "Un-reconcile first if you want to change it.")
             return
 
         success, message = self.system.mark_resolved(bank, comment)
@@ -1430,9 +1428,10 @@ class ReconciliationGUI:
         if not bank:
             return
         rec = self.system.get_reconciliation_for_bank(bank.id)
-        if rec and rec.status == 'manually_resolved' and rec.comment:
+        if rec:
             self.resolved_entry.delete(0, tk.END)
-            self.resolved_entry.insert(0, rec.comment)
+            if rec.comment:
+                self.resolved_entry.insert(0, rec.comment)
             self.resolved_entry.focus_set()
 
     def _on_config_changed(self):
@@ -1748,12 +1747,16 @@ class ReconciliationGUI:
         unreconciled_beacon_path = os.path.join(data_dir, "report_unreconciled_beacon.csv")
         resolved_path = os.path.join(data_dir, "report_resolved.csv")
         stats_path = os.path.join(data_dir, "report_stats.txt")
+        inconsistencies_path = os.path.join(data_dir, "report_inconsistencies.csv")
+        unresolved_memno_path = os.path.join(data_dir, "report_unresolved_memno.csv")
 
         r1 = self.system.export_reconciled_csv(reconciled_path)
         r2 = self.system.export_unreconciled_bank_csv(unreconciled_bank_path)
         r3 = self.system.export_unreconciled_beacon_csv(unreconciled_beacon_path)
         r4 = self.system.export_resolved_csv(resolved_path)
         self.system.export_stats_summary(stats_path)
+        r6 = self.system.export_inconsistencies_csv(inconsistencies_path)
+        r7 = self.system.export_unresolved_memno_csv(unresolved_memno_path)
 
         comparison_msg = ""
         if self.system.backup_file:
@@ -1764,7 +1767,7 @@ class ReconciliationGUI:
                 self.system.export_comparison_report(beacon_csv, comp_path)
                 result = self.system.compare_with_beacon_csv(beacon_csv)
                 comparison_msg = (
-                    f"\n6. Comparison report: {len(result['in_both'])} matched, "
+                    f"\n8. Comparison report: {len(result['in_both'])} matched, "
                     f"{len(result['only_in_excel'])} only in Excel, "
                     f"{len(result['only_in_csv'])} only in CSV, "
                     f"{len(result['differences'])} with differences"
@@ -1777,7 +1780,9 @@ class ReconciliationGUI:
             f"2. Un-reconciled bank: {r2} rows\n"
             f"3. Un-reconciled beacon: {r3} rows\n"
             f"4. Manually resolved: {r4} rows\n"
-            f"5. Stats summary"
+            f"5. Stats summary\n"
+            f"6. Inconsistencies: {r6} rows\n"
+            f"7. Unresolved memnos: {r7} rows"
             f"{comparison_msg}\n\n"
             f"Version: {VERSION}"
         )

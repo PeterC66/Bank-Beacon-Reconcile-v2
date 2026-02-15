@@ -20,7 +20,7 @@ Features:
 - Auto-reconcile high-confidence matches
 """
 
-VERSION = "2.0.1"
+VERSION = "2.1.0"
 
 import csv
 import json
@@ -295,6 +295,13 @@ class ReconciliationSystem:
                 print(f"Warning: Could not parse bank_date_to: {self.config['bank_date_to']}")
 
 
+        # Member number aliases: old_memno -> new_memno (resolved chains)
+        self.memno_aliases: Dict[str, str] = {}
+
+        # Confusable member pairs (from config)
+        self.confusable_members: List[List[str]] = []
+        self._confusable_set: set = set()  # All memnos that are confusable
+
         # Index for fast lookups
         self._beacon_by_amount: Dict[Decimal, List[BeaconEntry]] = {}
         self._beacon_amounts: set = set()
@@ -328,7 +335,10 @@ class ReconciliationSystem:
         else:
             self.beacon_entries = self._load_beacon_entries()
             self._load_member_lookup()
+        self._load_memno_aliases()
+        self._load_confusable_members()
         self._resolve_member_numbers()
+        self._apply_memno_aliases()
         self._load_state()
         self._backfill_beacon_mem_nos()
         self._rebuild_indices()
@@ -441,6 +451,106 @@ class ReconciliationSystem:
         print(f"Loaded {len(self.member_lookup)} member lookup entries")
 
     # -------------------------------------------------------------------
+    # Member number aliases and confusable members
+    # -------------------------------------------------------------------
+
+    def _load_memno_aliases(self):
+        """Load memno_aliases.csv from code directory.
+
+        Format: old_memno,new_memno
+        Resolves chains (A->B->C becomes A->C, B->C) and detects cycles.
+        """
+        self.memno_aliases = {}
+        alias_file = os.path.join(self.code_dir, 'memno_aliases.csv')
+        if not os.path.exists(alias_file):
+            return
+
+        raw_aliases: Dict[str, str] = {}
+        with open(alias_file, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                old = row.get('old_memno', '').strip()
+                new = row.get('new_memno', '').strip()
+                if old and new and old != new:
+                    raw_aliases[old] = new
+
+        # Resolve chains with cycle guard
+        for old in raw_aliases:
+            visited = {old}
+            current = old
+            while current in raw_aliases:
+                next_val = raw_aliases[current]
+                if next_val in visited:
+                    print(f"Warning: Cycle detected in memno_aliases: {old} -> ... -> {next_val}")
+                    break
+                visited.add(next_val)
+                current = next_val
+            if current != old:
+                self.memno_aliases[old] = current
+
+        if self.memno_aliases:
+            print(f"Loaded {len(self.memno_aliases)} member number aliases")
+
+    def resolve_memno_alias(self, memno: str) -> str:
+        """Resolve a member number through aliases. Returns the canonical memno."""
+        return self.memno_aliases.get(memno, memno)
+
+    def _apply_memno_aliases(self):
+        """Apply memno aliases to all resolved member numbers on bank and beacon entries."""
+        if not self.memno_aliases:
+            return
+
+        applied = 0
+        for bank in self.bank_transactions:
+            new_nos = [self.resolve_memno_alias(n) for n in bank.mem_nos]
+            if new_nos != bank.mem_nos:
+                bank.mem_nos = new_nos
+                applied += 1
+
+        for beacon in self.beacon_entries:
+            if beacon.mem_no_1 and beacon.mem_no_1 in self.memno_aliases:
+                beacon.mem_no_1 = self.memno_aliases[beacon.mem_no_1]
+                applied += 1
+            if beacon.mem_no_2 and beacon.mem_no_2 in self.memno_aliases:
+                beacon.mem_no_2 = self.memno_aliases[beacon.mem_no_2]
+                applied += 1
+
+        if applied:
+            print(f"Applied memno aliases to {applied} entries")
+
+    def _load_confusable_members(self):
+        """Load confusable member pairs from per-dataset config."""
+        self.confusable_members = self.config.get('confusable_members', [])
+        self._confusable_set = set()
+        for pair in self.confusable_members:
+            for memno in pair:
+                self._confusable_set.add(str(memno))
+        if self.confusable_members:
+            print(f"Loaded {len(self.confusable_members)} confusable member pair(s)")
+
+    def is_confusable_member(self, memno: str) -> bool:
+        """Check if a member number is in the confusable members list."""
+        return memno in self._confusable_set
+
+    def get_confusable_warning(self, memno: str) -> str:
+        """Get warning text for a confusable member, or empty string."""
+        if not memno or memno not in self._confusable_set:
+            return ""
+        for pair in self.confusable_members:
+            str_pair = [str(m) for m in pair]
+            if memno in str_pair:
+                other_nos = [m for m in str_pair if m != memno]
+                other_names = []
+                for other in other_nos:
+                    info = self.member_lookup.get(other)
+                    if info:
+                        other_names.append(f"#{other} {info['forename']} {info['surname']}")
+                    else:
+                        other_names.append(f"#{other}")
+                return f"Confusable with {', '.join(other_names)}"
+        return ""
+
+    # -------------------------------------------------------------------
     # Member number resolution
     # -------------------------------------------------------------------
 
@@ -474,7 +584,7 @@ class ReconciliationSystem:
                                 name_to_memno: Dict[str, str]) -> str:
         """Resolve a member name (ForenameSurname) to a member number.
         Strips titles, noise words, and periods before matching.
-        Falls back to surname+initial matching if exact match fails."""
+        Falls back to surname+initial, then surname-only matching."""
         if not member_name:
             return ""
         cleaned = self._strip_titles(member_name).replace('.', '').replace(' ', '').upper()
@@ -490,31 +600,44 @@ class ReconciliationSystem:
                             break
         if not result and cleaned:
             # Fallback: surname + initial matching
-            # Extract surname (last word) and initial (first letter) from stripped name
-            parts = self._strip_titles(member_name).replace('.', '').split()
-            if len(parts) >= 2:
-                initial = parts[0][0].upper()
-                surname = parts[-1].upper()
-            elif len(parts) == 1:
-                # Single word - could be just surname or ForenameSurname joined
-                # Try to find members whose surname matches the end of the string
-                initial = cleaned[0] if cleaned else ''
-                surname = ''
-                for mem_no, info in self.member_lookup.items():
-                    s = info['surname'].upper()
-                    if cleaned.endswith(s) and len(cleaned) > len(s):
-                        surname = s
-                        initial = cleaned[0]
-                        break
-                if not surname:
-                    return ""
-            else:
-                return ""
-
-            matches = self._find_members_by_surname_initial(surname, initial)
-            if len(matches) == 1:
-                result = matches[0]
+            surname, initial = self._extract_surname_initial(member_name, cleaned)
+            if surname:
+                matches = self._find_members_by_surname_initial(surname, initial)
+                if len(matches) == 1:
+                    result = matches[0]
+                elif len(matches) == 0 and initial:
+                    # No initial match - try surname-only if unique member
+                    all_surname = self._find_members_by_surname(surname)
+                    if len(all_surname) == 1:
+                        result = all_surname[0]
         return result
+
+    def _extract_surname_initial(self, member_name: str, cleaned: str) -> Tuple[str, str]:
+        """Extract surname and initial from a member name string.
+
+        Args:
+            member_name: Original member name (e.g. "G. Burnett")
+            cleaned: Pre-cleaned version (uppercase, no periods/spaces)
+
+        Returns (surname, initial) tuple. Either may be empty.
+        """
+        parts = self._strip_titles(member_name).replace('.', '').split()
+        if len(parts) >= 2:
+            return parts[-1].upper(), parts[0][0].upper()
+        elif len(parts) == 1:
+            word = parts[0].upper()
+            for mem_no, info in self.member_lookup.items():
+                s = info['surname'].upper()
+                if word.endswith(s) and len(word) > len(s):
+                    return s, word[0]
+            return '', ''
+        return '', ''
+
+    def _find_members_by_surname(self, surname: str) -> List[str]:
+        """Find all member numbers with a given surname."""
+        surname_upper = surname.upper()
+        return [mn for mn, info in self.member_lookup.items()
+                if info['surname'].upper() == surname_upper]
 
     def _find_members_by_surname_initial(self, surname: str, initial: str) -> List[str]:
         """Find member numbers matching a surname and forename initial.
@@ -1366,6 +1489,9 @@ class ReconciliationSystem:
 
                 if member['status'].lower() != 'current':
                     name += f" ({member['status']})"
+                warning = self.get_confusable_warning(num)
+                if warning:
+                    name += f" \u26a0 {warning}"
                 lines.append(f"Member {num}: {name}")
             else:
                 lines.append(f"{num} is an unknown mem_no")
@@ -1395,35 +1521,28 @@ class ReconciliationSystem:
                     name = f"{info['forename']} ({known_as}) {info['surname']}"
                 else:
                     name = f"{info['forename']} {info['surname']}"
+                warning = self.get_confusable_warning(mem_no)
+                if warning:
+                    return f"#{mem_no} {name} \u26a0 {warning}"
                 return f"#{mem_no} {name}"
             return f"#{mem_no}"
 
         if member_text:
             # Name present but not resolved - explain why
-            # Try surname + initial matching to give informative message
-            parts = self._strip_titles(member_text).replace('.', '').split()
-            if len(parts) >= 2:
-                initial = parts[0][0].upper()
-                surname = parts[-1].upper()
-            elif len(parts) == 1:
-                # Single word - try to find matching surname
-                word = parts[0].upper()
-                initial = word[0] if word else ''
-                surname = ''
-                for mn, info in self.member_lookup.items():
-                    s = info['surname'].upper()
-                    if word.endswith(s) and len(word) > len(s):
-                        surname = s
-                        initial = word[0]
-                        break
-                if not surname:
-                    return f"{member_text} (not recognised)"
-            else:
+            cleaned = self._strip_titles(member_text).replace('.', '').replace(' ', '').upper()
+            surname, initial = self._extract_surname_initial(member_text, cleaned)
+            if not surname:
                 return f"{member_text} (not recognised)"
 
             matches = self._find_members_by_surname_initial(surname, initial)
             if len(matches) > 1:
                 return f"{member_text} ({len(matches)} possible memnos)"
+            # Check surname-only matches
+            all_surname = self._find_members_by_surname(surname)
+            if len(all_surname) > 1:
+                return f"{member_text} ({len(all_surname)} with surname)"
+            if len(all_surname) == 0:
+                return f"{member_text} (not recognised)"
             return f"{member_text} (not recognised)"
 
         return "--"
@@ -1724,12 +1843,10 @@ class ReconciliationSystem:
         return True, "Marked as manually resolved"
 
     def update_resolved_comment(self, bank_id: str, new_comment: str) -> Tuple[bool, str]:
-        """Update the comment on a manually resolved bank entry."""
+        """Update the comment on a reconciled or manually resolved bank entry."""
         rec = self._reconciled_bank_ids.get(bank_id)
         if rec is None:
             return False, f"Bank entry {bank_id} is not reconciled"
-        if rec.status != 'manually_resolved':
-            return False, f"Bank entry {bank_id} is not manually resolved"
         rec.comment = new_comment
         self.save_state()
         return True, "Comment updated"
@@ -1880,21 +1997,31 @@ class ReconciliationSystem:
     def search_bank_entries(self, search_term: str) -> List[int]:
         """Search bank entries and return matching indices.
 
+        Prefix with # to search by member number (e.g. #823).
         Returns indices into self.bank_transactions.
         """
-        term = search_term.strip().lower()
+        term = search_term.strip()
         if not term:
             return []
 
+        # #memno search
+        if term.startswith('#'):
+            memno = term[1:].strip()
+            if memno:
+                return [i for i, bank in enumerate(self.bank_transactions)
+                        if memno in bank.mem_nos]
+            return []
+
+        term_lower = term.lower()
         results = []
         for i, bank in enumerate(self.bank_transactions):
-            if term in bank.description.lower():
+            if term_lower in bank.description.lower():
                 results.append(i)
-            elif term in bank.id.lower():
+            elif term_lower in bank.id.lower():
                 results.append(i)
-            elif term.lstrip('£') and self._is_amount_match(term, bank.amount):
+            elif term_lower.lstrip('£') and self._is_amount_match(term_lower, bank.amount):
                 results.append(i)
-            elif self._is_date_match(term, bank.date):
+            elif self._is_date_match(term_lower, bank.date):
                 results.append(i)
         return results
 
@@ -1909,13 +2036,15 @@ class ReconciliationSystem:
                                available_only: bool = False) -> List[BeaconEntry]:
         """Search beacon entries by various criteria.
 
+        Prefix with # to search by member number (e.g. #823).
+
         Args:
             search_term: The search term
             available_only: If True, only search un-reconciled beacons
 
         Returns matching BeaconEntry objects.
         """
-        term = search_term.strip().lower()
+        term = search_term.strip()
         if not term:
             return []
 
@@ -1923,19 +2052,28 @@ class ReconciliationSystem:
         if available_only:
             entries = [b for b in entries if b.id not in self._reconciled_beacon_ids]
 
+        # #memno search
+        if term.startswith('#'):
+            memno = term[1:].strip()
+            if memno:
+                return [b for b in entries
+                        if b.mem_no_1 == memno or b.mem_no_2 == memno]
+            return []
+
+        term_lower = term.lower()
         results = []
         for beacon in entries:
-            if term in beacon.payee.lower():
+            if term_lower in beacon.payee.lower():
                 results.append(beacon)
-            elif term in beacon.trans_no.lower():
+            elif term_lower in beacon.trans_no.lower():
                 results.append(beacon)
-            elif term in beacon.id.lower():
+            elif term_lower in beacon.id.lower():
                 results.append(beacon)
-            elif term in beacon.detail.lower():
+            elif term_lower in beacon.detail.lower():
                 results.append(beacon)
-            elif term.lstrip('£') and self._is_amount_match(term, beacon.amount):
+            elif term_lower.lstrip('£') and self._is_amount_match(term_lower, beacon.amount):
                 results.append(beacon)
-            elif self._is_date_match(term, beacon.date):
+            elif self._is_date_match(term_lower, beacon.date):
                 results.append(beacon)
         return results
 
@@ -2165,7 +2303,7 @@ class ReconciliationSystem:
             writer.writerow([
                 'bank_id', 'bank_date', 'bank_description', 'bank_amount',
                 'beacon_trans_no', 'beacon_date', 'beacon_payee', 'beacon_amount',
-                'beacon_member_1', 'match_type'
+                'beacon_member_1', 'match_type', 'comment'
             ])
             for rec in self.reconciliations:
                 if rec.status != 'reconciled':
@@ -2182,7 +2320,8 @@ class ReconciliationSystem:
                         bank.description, str(bank.amount),
                         beacon.trans_no, beacon.date.strftime('%d/%m/%Y'),
                         beacon.payee, str(beacon.amount),
-                        beacon.member_1, rec.match_type
+                        beacon.member_1, rec.match_type,
+                        rec.comment
                     ])
                     rows += 1
         return rows
@@ -2236,6 +2375,64 @@ class ReconciliationSystem:
                     rec.comment
                 ])
         return len(resolved)
+
+    def export_inconsistencies_csv(self, filepath: str) -> int:
+        """Export all inconsistencies to CSV. Returns rows written."""
+        issues = self.check_consistency()
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            self._write_report_header(writer, "Inconsistencies Report")
+            writer.writerow(['bank_id', 'status', 'ignored', 'reason'])
+            for rec, reason in issues:
+                ignored = "Yes" if self.is_inconsistency_ignored(rec.bank_id, reason) else ""
+                writer.writerow([rec.bank_id, rec.status, ignored, reason])
+        return len(issues)
+
+    def export_unresolved_memno_csv(self, filepath: str) -> int:
+        """Export all reconciled matches where memno cannot be identified. Returns rows written."""
+        bank_by_id = {b.id: b for b in self.bank_transactions}
+        beacon_by_id = {b.id: b for b in self.beacon_entries}
+        rows = 0
+
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            self._write_report_header(writer, "Unresolved Member Numbers Report")
+            writer.writerow([
+                'bank_id', 'bank_description', 'bank_amount', 'bank_memnos',
+                'beacon_id', 'beacon_payee', 'beacon_member_1', 'beacon_mem_no_1',
+                'beacon_member_2', 'beacon_mem_no_2', 'reason'
+            ])
+            for rec in self.reconciliations:
+                if rec.status == 'manually_resolved':
+                    continue
+                bank = bank_by_id.get(rec.bank_id)
+                if not bank:
+                    continue
+                for bid in rec.beacon_ids:
+                    beacon = beacon_by_id.get(bid)
+                    if not beacon:
+                        continue
+                    # Check if any member is unresolved
+                    reasons = []
+                    if beacon.member_1 and not beacon.mem_no_1:
+                        reasons.append(f"member_1 '{beacon.member_1}' unresolved")
+                    if beacon.member_2 and not beacon.mem_no_2:
+                        reasons.append(f"member_2 '{beacon.member_2}' unresolved")
+                    # Also flag if bank has no mem_nos and beacon has no mem_nos
+                    if not bank.mem_nos and not beacon.mem_no_1 and not beacon.mem_no_2:
+                        if not beacon.member_1 and not beacon.member_2:
+                            reasons.append("no member info on either side")
+                    if reasons:
+                        bank_memnos = ', '.join(bank.mem_nos) if bank.mem_nos else ''
+                        writer.writerow([
+                            bank.id, bank.description, str(bank.amount), bank_memnos,
+                            beacon.id, beacon.payee,
+                            beacon.member_1, beacon.mem_no_1,
+                            beacon.member_2, beacon.mem_no_2,
+                            '; '.join(reasons)
+                        ])
+                        rows += 1
+        return rows
 
     def export_stats_summary(self, filepath: str):
         """Export a stats summary report."""
