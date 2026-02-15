@@ -20,7 +20,7 @@ Features:
 - Auto-reconcile high-confidence matches
 """
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 import csv
 import json
@@ -259,6 +259,7 @@ class ReconciliationSystem:
         # State: reconciliations and rejected pairings
         self.reconciliations: List[Reconciliation] = []
         self.rejected_pairings: List[Dict] = []  # [{bank_id, beacon_id}, ...]
+        self.ignored_inconsistencies: List[Dict] = []  # [{bank_id, reason}, ...]
         # Out-of-range state (preserved on save but not used in session)
         self._out_of_range_reconciliations: List[Reconciliation] = []
         self._out_of_range_rejected: List[Dict] = []
@@ -472,10 +473,11 @@ class ReconciliationSystem:
     def _resolve_name_to_memno(self, member_name: str,
                                 name_to_memno: Dict[str, str]) -> str:
         """Resolve a member name (ForenameSurname) to a member number.
-        Strips titles and noise words (REFUND etc.) before matching."""
+        Strips titles, noise words, and periods before matching.
+        Falls back to surname+initial matching if exact match fails."""
         if not member_name:
             return ""
-        cleaned = self._strip_titles(member_name).replace(' ', '').upper()
+        cleaned = self._strip_titles(member_name).replace('.', '').replace(' ', '').upper()
         result = name_to_memno.get(cleaned, "")
         if not result:
             # Try stripping noise word prefixes joined without space (e.g. "RefundSmithJ")
@@ -486,7 +488,55 @@ class ReconciliationSystem:
                         result = name_to_memno.get(alt, "")
                         if result:
                             break
+        if not result and cleaned:
+            # Fallback: surname + initial matching
+            # Extract surname (last word) and initial (first letter) from stripped name
+            parts = self._strip_titles(member_name).replace('.', '').split()
+            if len(parts) >= 2:
+                initial = parts[0][0].upper()
+                surname = parts[-1].upper()
+            elif len(parts) == 1:
+                # Single word - could be just surname or ForenameSurname joined
+                # Try to find members whose surname matches the end of the string
+                initial = cleaned[0] if cleaned else ''
+                surname = ''
+                for mem_no, info in self.member_lookup.items():
+                    s = info['surname'].upper()
+                    if cleaned.endswith(s) and len(cleaned) > len(s):
+                        surname = s
+                        initial = cleaned[0]
+                        break
+                if not surname:
+                    return ""
+            else:
+                return ""
+
+            matches = self._find_members_by_surname_initial(surname, initial)
+            if len(matches) == 1:
+                result = matches[0]
         return result
+
+    def _find_members_by_surname_initial(self, surname: str, initial: str) -> List[str]:
+        """Find member numbers matching a surname and forename initial.
+
+        Returns list of matching member numbers.
+        """
+        matches = []
+        surname_upper = surname.upper()
+        initial_upper = initial.upper() if initial else ''
+        for mem_no, info in self.member_lookup.items():
+            if info['surname'].upper() != surname_upper:
+                continue
+            if not initial_upper:
+                matches.append(mem_no)
+                continue
+            forename = info['forename'].upper()
+            known_as = info.get('known_as', '').strip().upper()
+            if forename and forename[0] == initial_upper:
+                matches.append(mem_no)
+            elif known_as and known_as[0] == initial_upper:
+                matches.append(mem_no)
+        return matches
 
     def _resolve_member_numbers(self):
         """Resolve member numbers on all bank and beacon entries.
@@ -916,6 +966,8 @@ class ReconciliationSystem:
                     self._out_of_range_rejected.append(rp)
                     skipped_rejected += 1
 
+            self.ignored_inconsistencies = state.get('ignored_inconsistencies', [])
+
             self._rebuild_lookups()
 
             # Mark beacon entries as matched
@@ -945,11 +997,35 @@ class ReconciliationSystem:
         state = {
             'version': VERSION,
             'reconciliations': [r.to_dict() for r in all_recs],
-            'rejected_pairings': all_rejected
+            'rejected_pairings': all_rejected,
+            'ignored_inconsistencies': self.ignored_inconsistencies
         }
 
         with open(self.state_file, 'w', encoding='utf-8') as f:
             json.dump(state, f, indent=2)
+
+    def is_inconsistency_ignored(self, bank_id: str, reason: str) -> bool:
+        """Check if a specific inconsistency has been marked as ignored."""
+        for item in self.ignored_inconsistencies:
+            if item['bank_id'] == bank_id and item['reason'] == reason:
+                return True
+        return False
+
+    def ignore_inconsistency(self, bank_id: str, reason: str):
+        """Mark an inconsistency as ignored."""
+        if not self.is_inconsistency_ignored(bank_id, reason):
+            self.ignored_inconsistencies.append({
+                'bank_id': bank_id, 'reason': reason
+            })
+            self.save_state()
+
+    def unignore_inconsistency(self, bank_id: str, reason: str):
+        """Remove an inconsistency from the ignored list."""
+        self.ignored_inconsistencies = [
+            item for item in self.ignored_inconsistencies
+            if not (item['bank_id'] == bank_id and item['reason'] == reason)
+        ]
+        self.save_state()
 
     def _rebuild_lookups(self):
         """Rebuild derived lookup structures from reconciliations and rejected pairings."""
@@ -1324,12 +1400,30 @@ class ReconciliationSystem:
 
         if member_text:
             # Name present but not resolved - explain why
-            name_to_memno = self._build_name_to_memno_lookup()
-            cleaned = self._strip_titles(member_text).replace(' ', '').upper()
-            # Check for duplicate matches (same name mapping to different numbers)
-            matches = [mn for name, mn in name_to_memno.items() if name == cleaned]
+            # Try surname + initial matching to give informative message
+            parts = self._strip_titles(member_text).replace('.', '').split()
+            if len(parts) >= 2:
+                initial = parts[0][0].upper()
+                surname = parts[-1].upper()
+            elif len(parts) == 1:
+                # Single word - try to find matching surname
+                word = parts[0].upper()
+                initial = word[0] if word else ''
+                surname = ''
+                for mn, info in self.member_lookup.items():
+                    s = info['surname'].upper()
+                    if word.endswith(s) and len(word) > len(s):
+                        surname = s
+                        initial = word[0]
+                        break
+                if not surname:
+                    return f"{member_text} (not recognised)"
+            else:
+                return f"{member_text} (not recognised)"
+
+            matches = self._find_members_by_surname_initial(surname, initial)
             if len(matches) > 1:
-                return f"{member_text} (duplicate members)"
+                return f"{member_text} ({len(matches)} possible memnos)"
             return f"{member_text} (not recognised)"
 
         return "--"

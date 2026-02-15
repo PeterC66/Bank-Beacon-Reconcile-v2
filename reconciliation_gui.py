@@ -86,7 +86,9 @@ class ReconciliationGUI:
         self.beacon_search_active: bool = False
 
         # Consistency check state
-        self.inconsistencies: list = []  # [(Reconciliation, reason), ...]
+        self.inconsistencies: list = []  # [(Reconciliation, reason), ...] - active (non-ignored)
+        self.ignored_inconsistencies_shown: list = []  # Temporarily shown ignored issues
+        self.showing_ignored: bool = False
         self.inconsistency_index: int = 0
 
         # Build bank list
@@ -710,23 +712,34 @@ class ReconciliationGUI:
         ttk.Button(row1, text="Reports",
                     command=self._on_reports).pack(side=tk.LEFT, padx=3)
 
-        ttk.Separator(row1, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        # Row 2: Consistency check
+        row2_consistency = ttk.Frame(action_frame)
+        row2_consistency.pack(fill=tk.X, pady=(0, 4))
 
-        ttk.Button(row1, text="Check Consistency",
+        ttk.Button(row2_consistency, text="Check Consistency",
                     command=self._on_consistency_check).pack(side=tk.LEFT, padx=3)
-        self.inconsistency_label = ttk.Label(row1, text="", foreground='gray',
-                                              style='Small.TLabel')
-        self.inconsistency_label.pack(side=tk.LEFT, padx=3)
-        self.inconsistency_prev_btn = ttk.Button(row1, text="< Issue",
+        self.inconsistency_prev_btn = ttk.Button(row2_consistency, text="< Issue",
                                                    command=self._on_inconsistency_prev,
                                                    state=tk.DISABLED)
         self.inconsistency_prev_btn.pack(side=tk.LEFT, padx=1)
-        self.inconsistency_next_btn = ttk.Button(row1, text="Issue >",
+        self.inconsistency_next_btn = ttk.Button(row2_consistency, text="Issue >",
                                                    command=self._on_inconsistency_next,
                                                    state=tk.DISABLED)
         self.inconsistency_next_btn.pack(side=tk.LEFT, padx=1)
+        self.ignore_issue_btn = ttk.Button(row2_consistency, text="Ignore",
+                                            command=self._on_ignore_issue,
+                                            state=tk.DISABLED)
+        self.ignore_issue_btn.pack(side=tk.LEFT, padx=3)
+        self.show_ignored_label = ttk.Label(row2_consistency, text="",
+                                             foreground='#666666', cursor='hand2',
+                                             style='Small.TLabel')
+        self.show_ignored_label.pack(side=tk.LEFT, padx=5)
+        self.show_ignored_label.bind('<Button-1>', lambda e: self._on_show_ignored())
+        self.inconsistency_label = ttk.Label(row2_consistency, text="", foreground='gray',
+                                              style='Small.TLabel')
+        self.inconsistency_label.pack(side=tk.LEFT, padx=3, fill=tk.X, expand=True)
 
-        # Row 2: Manual match + resolved
+        # Row 3: Manual match + resolved
         row2 = ttk.Frame(action_frame)
         row2.pack(fill=tk.X, pady=(0, 2))
 
@@ -1549,18 +1562,116 @@ class ReconciliationGUI:
 
     def _on_consistency_check(self):
         """Run consistency check on all reconciliations."""
-        self.inconsistencies = self.system.check_consistency()
+        all_issues = self.system.check_consistency()
+        self.showing_ignored = False
+
+        # Separate active vs ignored
+        self.inconsistencies = [
+            (rec, reason) for rec, reason in all_issues
+            if not self.system.is_inconsistency_ignored(rec.bank_id, reason)
+        ]
+        self.ignored_inconsistencies_shown = [
+            (rec, reason) for rec, reason in all_issues
+            if self.system.is_inconsistency_ignored(rec.bank_id, reason)
+        ]
         self.inconsistency_index = 0
 
+        ignored_count = len(self.ignored_inconsistencies_shown)
         if not self.inconsistencies:
             self.inconsistency_label.config(text="")
             self.inconsistency_prev_btn.config(state=tk.DISABLED)
             self.inconsistency_next_btn.config(state=tk.DISABLED)
-            messagebox.showinfo("Consistency Check", "No inconsistencies found.")
+            self.ignore_issue_btn.config(state=tk.DISABLED)
+            msg = "No inconsistencies found."
+            if ignored_count:
+                msg += f" ({ignored_count} ignored)"
+            self._update_show_ignored_label()
+            messagebox.showinfo("Consistency Check", msg)
             return
 
+        self._update_show_ignored_label()
         self._update_inconsistency_nav()
         self._navigate_to_inconsistency(0)
+
+    def _update_show_ignored_label(self):
+        """Update the 'Show N ignored' label."""
+        ignored_count = len(self.ignored_inconsistencies_shown)
+        if ignored_count > 0:
+            if self.showing_ignored:
+                self.show_ignored_label.config(
+                    text=f"Hide {ignored_count} ignored",
+                    foreground='#666666'
+                )
+            else:
+                self.show_ignored_label.config(
+                    text=f"Show {ignored_count} ignored",
+                    foreground='#666666'
+                )
+        else:
+            self.show_ignored_label.config(text="")
+
+    def _on_show_ignored(self):
+        """Toggle display of ignored inconsistencies."""
+        if not self.ignored_inconsistencies_shown:
+            return
+
+        self.showing_ignored = not self.showing_ignored
+        if self.showing_ignored:
+            # Append ignored issues to the navigation list
+            self.inconsistencies = self.inconsistencies + self.ignored_inconsistencies_shown
+        else:
+            # Remove ignored issues from navigation
+            self.inconsistencies = [
+                (rec, reason) for rec, reason in self.inconsistencies
+                if not self.system.is_inconsistency_ignored(rec.bank_id, reason)
+            ]
+            # Adjust index if it's now out of range
+            if self.inconsistency_index >= len(self.inconsistencies):
+                self.inconsistency_index = max(0, len(self.inconsistencies) - 1)
+
+        self._update_show_ignored_label()
+        if self.inconsistencies:
+            self._update_inconsistency_nav()
+        else:
+            self.inconsistency_label.config(text="")
+            self.inconsistency_prev_btn.config(state=tk.DISABLED)
+            self.inconsistency_next_btn.config(state=tk.DISABLED)
+            self.ignore_issue_btn.config(state=tk.DISABLED)
+
+    def _on_ignore_issue(self):
+        """Ignore the currently displayed inconsistency."""
+        if not self.inconsistencies or self.inconsistency_index >= len(self.inconsistencies):
+            return
+
+        rec, reason = self.inconsistencies[self.inconsistency_index]
+
+        if self.system.is_inconsistency_ignored(rec.bank_id, reason):
+            # Currently ignored - un-ignore it
+            self.system.unignore_inconsistency(rec.bank_id, reason)
+            # Move from ignored list to active
+            self.ignored_inconsistencies_shown = [
+                (r, rsn) for r, rsn in self.ignored_inconsistencies_shown
+                if not (r.bank_id == rec.bank_id and rsn == reason)
+            ]
+        else:
+            # Ignore it
+            self.system.ignore_inconsistency(rec.bank_id, reason)
+            # Remove from active list, add to ignored
+            self.ignored_inconsistencies_shown.append((rec, reason))
+            self.inconsistencies.pop(self.inconsistency_index)
+            if self.inconsistency_index >= len(self.inconsistencies):
+                self.inconsistency_index = max(0, len(self.inconsistencies) - 1)
+
+        self._update_show_ignored_label()
+        if self.inconsistencies:
+            self._update_inconsistency_nav()
+            if self.inconsistencies:
+                self._navigate_to_inconsistency(self.inconsistency_index)
+        else:
+            self.inconsistency_label.config(text="No active issues remaining")
+            self.inconsistency_prev_btn.config(state=tk.DISABLED)
+            self.inconsistency_next_btn.config(state=tk.DISABLED)
+            self.ignore_issue_btn.config(state=tk.DISABLED)
 
     def _update_inconsistency_nav(self):
         """Update inconsistency navigation UI."""
@@ -1568,18 +1679,27 @@ class ReconciliationGUI:
             self.inconsistency_label.config(text="")
             self.inconsistency_prev_btn.config(state=tk.DISABLED)
             self.inconsistency_next_btn.config(state=tk.DISABLED)
+            self.ignore_issue_btn.config(state=tk.DISABLED)
             return
 
+        rec, reason = self.inconsistencies[self.inconsistency_index]
+        is_ignored = self.system.is_inconsistency_ignored(rec.bank_id, reason)
+
+        prefix = "[IGNORED] " if is_ignored else ""
         self.inconsistency_label.config(
             text=f"Issue {self.inconsistency_index + 1}/{len(self.inconsistencies)}: "
-                 f"{self.inconsistencies[self.inconsistency_index][1]}",
-            foreground='#CC0000'
+                 f"{prefix}{reason}",
+            foreground='#999999' if is_ignored else '#CC0000'
         )
         self.inconsistency_prev_btn.config(
             state=tk.NORMAL if self.inconsistency_index > 0 else tk.DISABLED
         )
         self.inconsistency_next_btn.config(
             state=tk.NORMAL if self.inconsistency_index < len(self.inconsistencies) - 1 else tk.DISABLED
+        )
+        self.ignore_issue_btn.config(
+            state=tk.NORMAL,
+            text="Un-ignore" if is_ignored else "Ignore"
         )
 
     def _navigate_to_inconsistency(self, index):

@@ -716,7 +716,17 @@ def test_member_number_resolution():
     assert system._resolve_name_to_memno("RefundLLeonard", lookup) == '823'  # no-space case
     assert system._resolve_name_to_memno("RefundVirginiaWykes", lookup) == '1679'
     assert system._resolve_name_to_memno("SubsBarbaraDuke", lookup) == '1783'
-    print("  _resolve_name_to_memno (with refund): PASSED")
+    # Period stripping (e.g. "L. Leonard" -> "LLeonard" -> exact match)
+    assert system._resolve_name_to_memno("L. Leonard", lookup) == '823'
+    # Surname + initial fallback: "V. Wykes" should match Virginia Wykes
+    assert system._resolve_name_to_memno("V. Wykes", lookup) == '1679'
+    # known_as initial: "G. Wykes" should match Ginny Wykes via known_as
+    assert system._resolve_name_to_memno("G. Wykes", lookup) == '1679'
+    # No matching initial: "X. Wykes" should not match
+    assert system._resolve_name_to_memno("X. Wykes", lookup) == ''
+    # Joined initial+surname: "B. Duke" should match Barbara Duke
+    assert system._resolve_name_to_memno("B. Duke", lookup) == '1783'
+    print("  _resolve_name_to_memno (with periods + initial fallback): PASSED")
 
     # --- Test _resolve_member_numbers on beacon entries ---
     # Create beacon entries with known member names and inject them
@@ -821,12 +831,101 @@ def test_member_number_resolution():
     )
     display_unk = system.get_beacon_member_display(unknown, 1)
     assert "not recognised" in display_unk, f"Got: {display_unk}"
-    print("  get_beacon_member_display: PASSED")
+
+    # Multiple matches: add a duplicate surname member to test "N possible memnos"
+    system.member_lookup['9001'] = {
+        'status': 'current', 'forename': 'Bob', 'surname': 'Leonard',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+    dup = BeaconEntry(
+        id="TEST_DUP", date=datetime(2025, 1, 15),
+        trans_no="M006", payee="Dup", detail="",
+        amount=Decimal("5.00"), member_1="X. Leonard"
+    )
+    # X. Leonard matches no forename initial, so "not recognised"
+    display_dup = system.get_beacon_member_display(dup, 1)
+    assert "not recognised" in display_dup, f"Got: {display_dup}"
+    # But if we use an ambiguous initial... no forename starts with X
+    # Let's test with "Leonard" (initial "L") - now 2 Leonards: L Leonard and Bob Leonard?
+    # Actually L matches L Leonard (823) but not Bob Leonard (9001). So single match.
+    # Let me use a real ambiguous case:
+    system.member_lookup['9002'] = {
+        'status': 'current', 'forename': 'Lisa', 'surname': 'Leonard',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+    dup2 = BeaconEntry(
+        id="TEST_DUP2", date=datetime(2025, 1, 15),
+        trans_no="M007", payee="Dup2", detail="",
+        amount=Decimal("5.00"), member_1="L. Leonard"
+    )
+    # L. Leonard -> "LLEONARD" matches exact lookup (823), so resolves
+    # That's correct - exact match takes priority.
+    # For "N possible memnos", need case where exact match fails but multiple surname+initial match
+    dup3 = BeaconEntry(
+        id="TEST_DUP3", date=datetime(2025, 1, 15),
+        trans_no="M008", payee="Dup3", detail="",
+        amount=Decimal("5.00"), member_1="Li. Leonard"
+    )
+    # "Li. Leonard" -> "LILEONARD" - no exact match, surname=LEONARD, initial=L
+    # Two Leonards start with L: 823 (L Leonard) and 9002 (Lisa Leonard)
+    display_dup3 = system.get_beacon_member_display(dup3, 1)
+    assert "2 possible memnos" in display_dup3, f"Got: {display_dup3}"
+    # Clean up test members
+    del system.member_lookup['9001']
+    del system.member_lookup['9002']
+    print("  get_beacon_member_display (with ambiguous): PASSED")
 
     # Restore original state
     system.beacon_entries = original_beacons
     system.reconciliations = [r for r in system.reconciliations if r.bank_id != "TEST_B1"]
     system.bank_transactions = [b for b in system.bank_transactions if b.id != "TEST_B1"]
+
+    print("PASSED")
+
+
+def test_ignored_inconsistencies():
+    """Test ignoring and un-ignoring inconsistencies with state persistence."""
+    print("\n=== Test: Ignored Inconsistencies ===")
+
+    system = make_system()
+
+    # Initially no ignored inconsistencies
+    assert len(system.ignored_inconsistencies) == 0
+
+    # Ignore an inconsistency
+    system.ignore_inconsistency("BANK_0001", "Test issue")
+    assert system.is_inconsistency_ignored("BANK_0001", "Test issue")
+    assert not system.is_inconsistency_ignored("BANK_0001", "Different issue")
+    assert not system.is_inconsistency_ignored("BANK_9999", "Test issue")
+    assert len(system.ignored_inconsistencies) == 1
+    print("  Ignore: PASSED")
+
+    # Duplicate ignore should not add twice
+    system.ignore_inconsistency("BANK_0001", "Test issue")
+    assert len(system.ignored_inconsistencies) == 1
+    print("  Duplicate ignore prevention: PASSED")
+
+    # Add another
+    system.ignore_inconsistency("BANK_0002", "Another issue")
+    assert len(system.ignored_inconsistencies) == 2
+
+    # Un-ignore
+    system.unignore_inconsistency("BANK_0001", "Test issue")
+    assert not system.is_inconsistency_ignored("BANK_0001", "Test issue")
+    assert len(system.ignored_inconsistencies) == 1
+    print("  Un-ignore: PASSED")
+
+    # State persistence: save and reload
+    system.save_state()
+    system2 = ReconciliationSystem(data_dir=DATA_DIR, code_dir=CODE_DIR)
+    system2.load_data()
+    assert len(system2.ignored_inconsistencies) == 1
+    assert system2.is_inconsistency_ignored("BANK_0002", "Another issue")
+    print("  State persistence: PASSED")
+
+    # Clean up
+    system2.ignored_inconsistencies = []
+    system2.save_state()
 
     print("PASSED")
 
@@ -951,6 +1050,7 @@ def run_all_tests():
     test_date_range_filter()
     test_cheque_matching()
     test_member_number_resolution()
+    test_ignored_inconsistencies()
     test_excel_backup_loading()
 
     # Final cleanup
