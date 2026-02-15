@@ -15,6 +15,7 @@ python test_reconciliation.py
 - `test_reconciliation.py` - Test suite (30 tests, uses `data/sample/`)
 - `member_lookup.csv` - Shared member directory (code level)
 - `memno_aliases.csv` - Member number aliases (code level, optional)
+- `confusable_members.csv` - Pairs of easily confused members (code level, optional)
 - `data/<dataset>/config.json` - Per-dataset configuration
 - `data/<dataset>/reconciliation_state_v2.json` - Saved state
 
@@ -28,7 +29,7 @@ python test_reconciliation.py
 ## Architecture Notes
 - Member resolution pipeline: exact name -> noise word strip -> surname+initial -> surname-only fallback
 - `memno_aliases.csv` maps old_memno -> new_memno with chain resolution
-- Confusable members configured per-dataset in config.json
+- `confusable_members.csv` at code level (memno_1,memno_2 pairs) shows warnings in UI
 - Bank CSV dates: multiple formats handled by `_parse_bank_date()`
 - Beacon CSV dates: always `%d/%m/%Y`
 - Decimal amounts: use `str(amount)` not format strings for display

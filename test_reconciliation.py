@@ -1007,44 +1007,51 @@ def test_memno_aliases():
 
 
 def test_confusable_members():
-    """Test confusable members config and warning display."""
+    """Test confusable members CSV loading and warning display."""
     print("\n=== Test: Confusable Members ===")
 
     from datetime import datetime
 
     system = make_system()
 
-    # Set up confusable members in config
-    system.config['confusable_members'] = [['823', '1679']]
-    system._load_confusable_members()
+    # Create a temp confusable_members.csv at code level
+    confusable_file = os.path.join(CODE_DIR, 'confusable_members.csv')
+    try:
+        with open(confusable_file, 'w', newline='', encoding='utf-8') as f:
+            f.write("memno_1,memno_2\n")
+            f.write("823,1679\n")
 
-    assert system.is_confusable_member('823')
-    assert system.is_confusable_member('1679')
-    assert not system.is_confusable_member('1783')
-    print("  is_confusable_member: PASSED")
+        system._load_confusable_members()
 
-    warning_823 = system.get_confusable_warning('823')
-    assert '#1679' in warning_823, f"Got: {warning_823}"
-    warning_1679 = system.get_confusable_warning('1679')
-    assert '#823' in warning_1679, f"Got: {warning_1679}"
-    warning_none = system.get_confusable_warning('1783')
-    assert warning_none == '', f"Got: {warning_none}"
-    print("  get_confusable_warning: PASSED")
+        assert system.is_confusable_member('823')
+        assert system.is_confusable_member('1679')
+        assert not system.is_confusable_member('1783')
+        print("  is_confusable_member: PASSED")
 
-    # Test display with confusable warning
-    beacon = BeaconEntry(
-        id="TEST_CONF", date=datetime(2025, 1, 15),
-        trans_no="C001", payee="Test", detail="",
-        amount=Decimal("10.00"), member_1="LLeonard", mem_no_1="823"
-    )
-    display = system.get_beacon_member_display(beacon, 1)
-    assert '\u26a0' in display, f"Expected warning symbol, got: {display}"
-    assert '#1679' in display, f"Expected confusable memno ref, got: {display}"
-    print("  Display with confusable warning: PASSED")
+        warning_823 = system.get_confusable_warning('823')
+        assert '#1679' in warning_823, f"Got: {warning_823}"
+        warning_1679 = system.get_confusable_warning('1679')
+        assert '#823' in warning_1679, f"Got: {warning_1679}"
+        warning_none = system.get_confusable_warning('1783')
+        assert warning_none == '', f"Got: {warning_none}"
+        print("  get_confusable_warning: PASSED")
 
-    # Clean up
-    system.config.pop('confusable_members', None)
-    system._load_confusable_members()
+        # Test display with confusable warning
+        beacon = BeaconEntry(
+            id="TEST_CONF", date=datetime(2025, 1, 15),
+            trans_no="C001", payee="Test", detail="",
+            amount=Decimal("10.00"), member_1="LLeonard", mem_no_1="823"
+        )
+        display = system.get_beacon_member_display(beacon, 1)
+        assert '\u26a0' in display, f"Expected warning symbol, got: {display}"
+        assert '#1679' in display, f"Expected confusable memno ref, got: {display}"
+        print("  Display with confusable warning: PASSED")
+
+    finally:
+        if os.path.exists(confusable_file):
+            os.remove(confusable_file)
+        # Reload to clear confusable state
+        system._load_confusable_members()
 
     print("PASSED")
 

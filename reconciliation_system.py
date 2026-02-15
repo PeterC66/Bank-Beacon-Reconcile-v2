@@ -519,12 +519,27 @@ class ReconciliationSystem:
             print(f"Applied memno aliases to {applied} entries")
 
     def _load_confusable_members(self):
-        """Load confusable member pairs from per-dataset config."""
-        self.confusable_members = self.config.get('confusable_members', [])
+        """Load confusable member pairs from confusable_members.csv at code level.
+
+        Format: memno_1,memno_2
+        Each row defines a pair of members who are easily confused.
+        """
+        self.confusable_members = []
         self._confusable_set = set()
-        for pair in self.confusable_members:
-            for memno in pair:
-                self._confusable_set.add(str(memno))
+        confusable_file = os.path.join(self.code_dir, 'confusable_members.csv')
+        if not os.path.exists(confusable_file):
+            return
+
+        with open(confusable_file, 'r', encoding='utf-8-sig') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                m1 = row.get('memno_1', '').strip()
+                m2 = row.get('memno_2', '').strip()
+                if m1 and m2 and m1 != m2:
+                    self.confusable_members.append([m1, m2])
+                    self._confusable_set.add(m1)
+                    self._confusable_set.add(m2)
+
         if self.confusable_members:
             print(f"Loaded {len(self.confusable_members)} confusable member pair(s)")
 
