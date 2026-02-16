@@ -59,15 +59,20 @@ class ReconciliationGUI:
         bank_count = len(self.system.bank_transactions)
         beacon_count = len(self.system.beacon_entries)
 
-        if bank_count == 0 or beacon_count == 0:
+        if bank_count == 0:
             messagebox.showwarning(
                 "Loading Issue",
-                f"Loaded {bank_count} bank transactions and {beacon_count} beacon entries.\n\n"
+                f"Loaded {bank_count} bank transactions.\n\n"
                 f"Data folder: {self.system.data_dir}\n\n"
-                f"Expected files:\n"
-                f"- {self.system.config['bank_file']}\n"
-                f"- {self.system.config['beacon_file']}\n\n"
-                f"Please ensure both files exist and have the correct format."
+                f"Expected file: {self.system.config['bank_file']}\n\n"
+                f"Please ensure the bank file exists and has the correct format."
+            )
+        elif beacon_count == 0:
+            messagebox.showinfo(
+                "No Beacon File",
+                f"Loaded {bank_count} bank transactions, no beacon entries.\n\n"
+                f"Beacon file not found or empty. Reconciliation will work "
+                f"with bank entries only (no comparison report)."
             )
 
         # Bank navigation state
@@ -276,6 +281,9 @@ class ReconciliationGUI:
 
         self.bank_nav_label = ttk.Label(nav_row, text="0 / 0", style='Small.TLabel')
         self.bank_nav_label.pack(side=tk.RIGHT)
+
+        ttk.Button(nav_row, text="Reset", command=self._on_reset,
+                   style='Nav.TButton').pack(side=tk.RIGHT, padx=(0, 5))
 
         # Status indicator
         self.bank_status_frame = tk.Frame(bank_outer, height=28)
@@ -1146,6 +1154,33 @@ class ReconciliationGUI:
                         break
                 else:
                     self.bank_index = len(self.bank_list) - 1
+        self._refresh_candidates()
+        self._update_display()
+
+    def _on_reset(self):
+        """Reset all searches and toggles to default state."""
+        # Clear bank search
+        self.bank_search_entry.delete(0, tk.END)
+        self.bank_search_matches = []
+        self.bank_search_index = 0
+        self.bank_search_result.config(text="")
+
+        # Clear beacon search
+        self.beacon_search_entry.delete(0, tk.END)
+        self.beacon_search_results = []
+        self.beacon_search_active = False
+        self.beacon_search_result.config(text="")
+
+        # Turn off Show All (back to un-reconciled only)
+        self.show_all_var.set(False)
+        self.show_all_bank = False
+
+        # Turn off All Beacons and Cheque filter
+        self.beacon_bypass_var.set(False)
+        self.cheque_filter_var.set(False)
+
+        # Rebuild and refresh
+        self._rebuild_bank_list()
         self._refresh_candidates()
         self._update_display()
 

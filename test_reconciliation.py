@@ -686,10 +686,23 @@ def test_member_number_resolution():
     assert system._strip_titles("DR PROF JohnSmith") == "JohnSmith"
     assert system._strip_titles("JohnSmith") == "JohnSmith"
     assert system._strip_titles("") == ""
-    # Noise words (Refund, Subs)
+    # Noise words (Refund, Subs, FOR, X)
     assert system._strip_titles("Refund JohnSmith") == "JohnSmith"
     assert system._strip_titles("REFUND MRS JaneSmith") == "JaneSmith"
     assert system._strip_titles("Subs LLeonard") == "LLeonard"
+    assert system._strip_titles("FOR JohnSmith") == "JohnSmith"
+    assert system._strip_titles("X JohnSmith") == "JohnSmith"
+    # FOR/X + number <20 stripped together
+    assert system._strip_titles("FOR 4 JohnSmith") == "JohnSmith"
+    assert system._strip_titles("X 2 JohnSmith") == "JohnSmith"
+    # FOR/X + number >=20 keeps the number
+    assert system._strip_titles("FOR 25 JohnSmith") == "25JohnSmith"
+    # _extract_potential_surnames: FOR/X + number<20 stripped from descriptions
+    surnames = system._extract_potential_surnames("SMITH J FOR 4")
+    assert 'SMITH' in surnames, f"Expected SMITH in {surnames}"
+    assert 'FOR' not in surnames, f"FOR should be stripped: {surnames}"
+    surnames_x = system._extract_potential_surnames("JONES X 2 PAYMENT")
+    assert 'JONES' in surnames_x, f"Expected JONES in {surnames_x}"
     print("  _strip_titles: PASSED")
 
     # --- Test _build_name_to_memno_lookup ---
@@ -716,6 +729,10 @@ def test_member_number_resolution():
     assert system._resolve_name_to_memno("RefundLLeonard", lookup) == '823'  # no-space case
     assert system._resolve_name_to_memno("RefundVirginiaWykes", lookup) == '1679'
     assert system._resolve_name_to_memno("SubsBarbaraDuke", lookup) == '1783'
+    # FOR / X noise word handling
+    assert system._resolve_name_to_memno("FOR LLeonard", lookup) == '823'
+    assert system._resolve_name_to_memno("X 4 VirginiaWykes", lookup) == '1679'  # X + number<20
+    assert system._resolve_name_to_memno("FOR 12 BarbaraDuke", lookup) == '1783'  # FOR + number<20
     # Period stripping (e.g. "L. Leonard" -> "LLeonard" -> exact match)
     assert system._resolve_name_to_memno("L. Leonard", lookup) == '823'
     # Surname + initial fallback: "V. Wykes" should match Virginia Wykes
@@ -842,9 +859,9 @@ def test_member_number_resolution():
         trans_no="M006", payee="Dup", detail="",
         amount=Decimal("5.00"), member_1="X. Leonard"
     )
-    # X. Leonard matches no forename initial but 2 Leonards exist, so "2 with surname"
+    # X. Leonard: X stripped as noise word, leaving just "Leonard" with 2 members
     display_dup = system.get_beacon_member_display(dup, 1)
-    assert "2 with surname" in display_dup, f"Got: {display_dup}"
+    assert "2 possible memnos" in display_dup, f"Got: {display_dup}"
     # But if we use an ambiguous initial... no forename starts with X
     # Let's test with "Leonard" (initial "L") - now 2 Leonards: L Leonard and Bob Leonard?
     # Actually L matches L Leonard (823) but not Bob Leonard (9001). So single match.

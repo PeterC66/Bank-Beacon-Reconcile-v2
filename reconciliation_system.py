@@ -570,14 +570,23 @@ class ReconciliationSystem:
     # -------------------------------------------------------------------
 
     TITLE_PREFIXES = {'MR', 'MRS', 'MS', 'MISS', 'DR', 'PROF', 'REV', 'SIR', 'LADY', 'LORD'}
-    NAME_NOISE_WORDS = {'REFUND', 'REFUNDS', 'SUBS', 'SUB'}
+    NAME_NOISE_WORDS = {'REFUND', 'REFUNDS', 'SUBS', 'SUB', 'FOR', 'X'}
 
     def _strip_titles(self, name: str) -> str:
-        """Strip title prefixes (MR, MRS, etc.) and noise words (REFUND, etc.) from a name string."""
+        """Strip title prefixes (MR, MRS, etc.), noise words (REFUND, FOR, X, etc.),
+        and trailing numbers <20 that follow FOR/X from a name string."""
         all_prefixes = self.TITLE_PREFIXES | self.NAME_NOISE_WORDS
         parts = name.strip().split()
         while parts and parts[0].upper().rstrip('.') in all_prefixes:
-            parts.pop(0)
+            word = parts.pop(0)
+            # If word was FOR or X and next part is a number <20, strip it too
+            if word.upper().rstrip('.') in ('FOR', 'X') and parts:
+                try:
+                    num = int(parts[0])
+                    if 0 <= num < 20:
+                        parts.pop(0)
+                except ValueError:
+                    pass
         return ''.join(parts)
 
     def _build_name_to_memno_lookup(self) -> Dict[str, str]:
@@ -645,6 +654,9 @@ class ReconciliationSystem:
                 s = info['surname'].upper()
                 if word.endswith(s) and len(word) > len(s):
                     return s, word[0]
+                if word == s:
+                    # Exact surname match with no initial (e.g. noise word stripped the initial)
+                    return s, ''
             return '', ''
         return '', ''
 
@@ -1018,7 +1030,8 @@ class ReconciliationSystem:
             # Header
             writer.writerow([self._get_title()])
             writer.writerow([f"Comparison Report - {datetime.now().strftime('%d/%m/%Y %H:%M')}"])
-            writer.writerow([f"Input file: {self._get_input_file_label()}"])
+            writer.writerow([f"Bank file: {self.config.get('bank_file', 'Bank_Transactions.csv')}"])
+            writer.writerow([f"Excel file: {self._get_input_file_label()}"])
             writer.writerow([f"Compared with: {beacon_csv_path}"])
             writer.writerow([])
 
@@ -1679,6 +1692,10 @@ class ReconciliationSystem:
         clean_text = re.sub(r'\bu3a\d*\b', '', text, flags=re.IGNORECASE)
         clean_text = re.sub(r'\bsubs?\b', '', clean_text, flags=re.IGNORECASE)
         clean_text = re.sub(r'\brefunds?\b', '', clean_text, flags=re.IGNORECASE)
+        # Strip "FOR <n>" and "X <n>" where n < 20
+        clean_text = re.sub(r'\b(?:FOR|X)\s+(\d{1,2})\b',
+                            lambda m: '' if int(m.group(1)) < 20 else m.group(0),
+                            clean_text, flags=re.IGNORECASE)
         clean_text = re.sub(r'\b\d+(/\d+)?\b', '', clean_text)
         clean_text = re.sub(r'[-]', ' ', clean_text)
         clean_text = ' '.join(clean_text.split())
@@ -1688,7 +1705,7 @@ class ReconciliationSystem:
         noise_words = {
             'PAYMENT', 'TRANSFER', 'CREDIT', 'DEBIT', 'REF', 'FT', 'TFR',
             'MISS', 'MR', 'MRS', 'MS', 'DR', 'PROF',
-            'THE', 'AND', 'FOR', 'WITH'
+            'THE', 'AND', 'FOR', 'WITH', 'X'
         }
 
         potential_surnames = []
@@ -2299,11 +2316,14 @@ class ReconciliationSystem:
         return self.config.get('beacon_file', 'Beacon_Entries.csv')
 
     def _write_report_header(self, writer, report_name: str):
-        """Write standard report header rows: title, report name, date/time, input file."""
+        """Write standard report header rows: title, report name, date/time, input files."""
         writer.writerow([self._get_title()])
         writer.writerow([report_name])
         writer.writerow([f"Generated: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"])
-        writer.writerow([f"Input file: {self._get_input_file_label()}"])
+        writer.writerow([f"Bank file: {self.config.get('bank_file', 'Bank_Transactions.csv')}"])
+        beacon_label = self._get_input_file_label()
+        if beacon_label:
+            writer.writerow([f"Beacon file: {beacon_label}"])
         writer.writerow([])  # Blank separator row
 
     def export_reconciled_csv(self, filepath: str) -> int:
