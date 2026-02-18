@@ -20,7 +20,7 @@ Features:
 - Auto-reconcile high-confidence matches
 """
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 import csv
 import json
@@ -61,6 +61,7 @@ class BankTransaction:
     amount: Decimal
     raw_data: Dict = field(default_factory=dict)
     mem_nos: List[str] = field(default_factory=list)  # Resolved member numbers
+    suggested_mem_nos: List[str] = field(default_factory=list)  # Tier-2 name-based suggestions
 
     def to_dict(self) -> Dict:
         return {
@@ -99,6 +100,7 @@ class BeaconEntry:
     matched: bool = False
     mem_no_1: str = ""  # Resolved numeric member number for member_1
     mem_no_2: str = ""  # Resolved numeric member number for member_2
+    suggested_mem_nos: List[str] = field(default_factory=list)  # Tier-2 payee-based suggestions
 
     def to_dict(self) -> Dict:
         return {
@@ -634,6 +636,173 @@ class ReconciliationSystem:
                         result = all_surname[0]
         return result
 
+    def _resolve_payee_to_memno(self, payee: str) -> Tuple[List[str], int]:
+        """Resolve space-separated beacon payee text to member number(s).
+
+        Handles multiple name formats:
+          - "Forename Surname"   (Peter Hayward)
+          - "Surname Forename"   (Bouch Angela)
+          - "Surname Initial"    (Oakman P, Anderson S)
+          - "Initial Surname"    (I Drummond, J Hockaday)
+          - "Surname Initials"   (Chapman SJ, Baker VA)
+
+        Returns (member_nos, tier):
+          tier 1 – confident, auto-assign  (exactly one member matched)
+          tier 2 – ambiguous suggestion    (multiple candidates)
+          tier 0 – no match
+        """
+        if not payee:
+            return [], 0
+
+        name_to_memno = self._build_name_to_memno_lookup()
+
+        # Clean: strip periods, split on spaces, remove noise/title words
+        all_prefixes = self.TITLE_PREFIXES | self.NAME_NOISE_WORDS | {
+            'AND', 'THE', 'WITH', 'OF', 'A'
+        }
+        words = [w for w in payee.replace('.', '').split()
+                 if re.match(r'^[A-Za-z]+$', w) and w.upper() not in all_prefixes]
+
+        if not words:
+            return [], 0
+
+        def _looks_like_initials(s: str) -> bool:
+            """True when s is 1–2 alpha chars (typical initials)."""
+            return 1 <= len(s) <= 2 and s.isalpha()
+
+        def _try_surname_initial(surname: str, initial: str) -> Tuple[List[str], int]:
+            matches = self._find_members_by_surname_initial(surname, initial)
+            if len(matches) == 1:
+                return [matches[0]], 1
+            if len(matches) > 1:
+                return matches, 2
+            # No initial match – try surname-only
+            all_s = self._find_members_by_surname(surname)
+            if len(all_s) == 1:
+                return [all_s[0]], 1
+            if len(all_s) > 1:
+                return all_s, 2
+            return [], 0
+
+        tier2: List[str] = []
+
+        if len(words) == 1:
+            result, tier = _try_surname_initial(words[0], '')
+            if tier == 1:
+                return result, 1
+            tier2.extend(m for m in result if m not in tier2)
+
+        elif len(words) == 2:
+            w1, w2 = words[0], words[1]
+
+            # Exact lookup: "Forename Surname" and "Surname Forename"
+            for concat in ((w1 + w2).upper(), (w2 + w1).upper()):
+                r = name_to_memno.get(concat)
+                if r:
+                    return [r], 1
+
+            if _looks_like_initials(w2) and not _looks_like_initials(w1):
+                # "Surname Initials" – e.g. "Chapman SJ", "Oakman P"
+                result, tier = _try_surname_initial(w1, w2[0])
+                if tier == 1:
+                    return result, 1
+                tier2.extend(m for m in result if m not in tier2)
+            elif _looks_like_initials(w1) and not _looks_like_initials(w2):
+                # "Initial Surname" – e.g. "I Drummond", "P Oakman"
+                result, tier = _try_surname_initial(w2, w1[0])
+                if tier == 1:
+                    return result, 1
+                tier2.extend(m for m in result if m not in tier2)
+            else:
+                # Both are full words ("Peter Hayward", "Bouch Angela")
+                # Try each as surname with the other providing the initial
+                for surname, initial_word in ((w1, w2), (w2, w1)):
+                    result, tier = _try_surname_initial(surname, initial_word[0])
+                    if tier == 1:
+                        return result, 1
+                    tier2.extend(m for m in result if m not in tier2)
+
+        else:
+            # 3+ words: try last word as surname with first initial, then first as surname
+            for surname, initial_word in ((words[-1], words[0]), (words[0], words[-1])):
+                result, tier = _try_surname_initial(surname, initial_word[0])
+                if tier == 1:
+                    return result, 1
+                tier2.extend(m for m in result if m not in tier2)
+
+        if tier2:
+            return tier2, 2
+        return [], 0
+
+    def _resolve_description_to_memno(self, description: str) -> Tuple[List[str], int]:
+        """Try to resolve a bank description to member number(s) via name matching.
+
+        Only called when extract_member_numbers() finds no numeric member numbers.
+        Scans description words for potential surnames and looks for adjacent
+        initials (1–2 letter tokens) to narrow the match.
+
+        Returns (member_nos, tier) using the same tier convention as
+        _resolve_payee_to_memno().
+        """
+        if not description:
+            return [], 0
+
+        # Clean the description: remove u3a tags, inline dates, standalone numbers
+        clean = re.sub(r'\bu3a\d*\b', '', description, flags=re.IGNORECASE)
+        clean = re.sub(r'\b\d{1,2}[A-Za-z]{3}\d{2,4}\b', '', clean)  # inline dates
+        clean = re.sub(r'\b(?:invoice|inv)\s*\d+', '', clean, flags=re.IGNORECASE)
+        clean = re.sub(r'\b\d+\b', '', clean)
+        clean = re.sub(r'[-]', ' ', clean)
+
+        noise = {
+            'PAYMENT', 'TRANSFER', 'CREDIT', 'DEBIT', 'REF', 'FT', 'TFR',
+            'MISS', 'MR', 'MRS', 'MS', 'DR', 'PROF', 'THE', 'AND', 'FOR',
+            'WITH', 'X', 'REFUND', 'REFUNDS', 'SUBS', 'SUB', 'INVOICE', 'INV',
+            'DIRECT', 'DD', 'BACS', 'CHQ', 'CHEQUE',
+        }
+
+        raw_words = clean.split()
+        cleaned_words = []
+        for w in raw_words:
+            cw = re.sub(r"[^A-Za-z]", '', w)
+            if cw and cw.upper() not in noise:
+                cleaned_words.append(cw)
+
+        if not cleaned_words:
+            return [], 0
+
+        tier2: List[str] = []
+
+        for i, word in enumerate(cleaned_words):
+            if len(word) <= 2:
+                # Short token – only useful as initial; handled when adjacent surnames found
+                continue
+
+            # Collect adjacent 1–2 letter tokens as candidate initials
+            initials = []
+            for j in (i - 1, i + 1):
+                if 0 <= j < len(cleaned_words):
+                    adj = cleaned_words[j]
+                    if 1 <= len(adj) <= 2 and adj.isalpha():
+                        initials.append(adj[0].upper())
+
+            if initials:
+                for initial in initials:
+                    matches = self._find_members_by_surname_initial(word, initial)
+                    if len(matches) == 1:
+                        return [matches[0]], 1
+                    tier2.extend(m for m in matches if m not in tier2)
+
+            # Try surname-only as well
+            all_s = self._find_members_by_surname(word)
+            if len(all_s) == 1:
+                return [all_s[0]], 1
+            tier2.extend(m for m in all_s if m not in tier2)
+
+        if tier2:
+            return tier2, 2
+        return [], 0
+
     def _extract_surname_initial(self, member_name: str, cleaned: str) -> Tuple[str, str]:
         """Extract surname and initial from a member name string.
 
@@ -689,18 +858,39 @@ class ReconciliationSystem:
     def _resolve_member_numbers(self):
         """Resolve member numbers on all bank and beacon entries.
 
-        For bank entries: extract member numbers from description.
-        For beacon entries: reverse-lookup member_1/member_2 names to numbers.
+        For bank entries: extract member numbers from description; when none
+        found, fall back to name-based matching (_resolve_description_to_memno).
+        For beacon entries: reverse-lookup member_1/member_2 names to numbers;
+        when those fields are empty, fall back to payee text resolution
+        (_resolve_payee_to_memno).
+
+        Tier-1 matches are assigned to official mem_no fields.
+        Tier-2 matches are stored in suggested_mem_nos for display only.
         """
         name_to_memno = self._build_name_to_memno_lookup()
 
-        # Bank entries: extract member numbers from description
+        # Bank entries: extract numeric member numbers from description
+        bank_payee_resolved = 0
+        bank_payee_suggested = 0
         for bank in self.bank_transactions:
             bank.mem_nos = self.extract_member_numbers(bank.description)
+            bank.suggested_mem_nos = []
+            if not bank.mem_nos:
+                # No numeric member numbers found – try name-based matching
+                nos, tier = self._resolve_description_to_memno(bank.description)
+                if tier == 1:
+                    bank.mem_nos = nos
+                    bank_payee_resolved += 1
+                elif tier == 2:
+                    bank.suggested_mem_nos = nos
+                    bank_payee_suggested += 1
 
         # Beacon entries: resolve member_1/member_2 text names to numbers
         resolved_count = 0
+        payee_resolved = 0
+        payee_suggested = 0
         for beacon in self.beacon_entries:
+            beacon.suggested_mem_nos = []
             if beacon.member_1:
                 mem_no = self._resolve_name_to_memno(beacon.member_1, name_to_memno)
                 if mem_no:
@@ -711,8 +901,25 @@ class ReconciliationSystem:
                 if mem_no:
                     beacon.mem_no_2 = mem_no
                     resolved_count += 1
+            # Payee fallback: only when member_1/member_2 fields are empty
+            if not beacon.mem_no_1 and not beacon.member_1:
+                nos, tier = self._resolve_payee_to_memno(beacon.payee)
+                if tier == 1 and nos:
+                    beacon.mem_no_1 = nos[0]
+                    payee_resolved += 1
+                elif tier == 2 and nos:
+                    beacon.suggested_mem_nos = nos
+                    payee_suggested += 1
 
         print(f"Resolved {resolved_count} beacon member names to member numbers")
+        if payee_resolved:
+            print(f"Resolved {payee_resolved} beacon entries via payee text (Tier 1)")
+        if payee_suggested:
+            print(f"Suggested {payee_suggested} beacon entries via payee text (Tier 2)")
+        if bank_payee_resolved:
+            print(f"Resolved {bank_payee_resolved} bank entries via description name matching (Tier 1)")
+        if bank_payee_suggested:
+            print(f"Suggested {bank_payee_suggested} bank entries via description name matching (Tier 2)")
 
     def _backfill_beacon_mem_nos(self):
         """After state is loaded, backfill beacon mem_nos from reconciled bank entries.
@@ -1482,6 +1689,9 @@ class ReconciliationSystem:
         clean_desc = re.sub(r'u3a\d*(?:and\d+)*', '', description, flags=re.IGNORECASE)
         date_pattern = r'\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b'
         clean_desc = re.sub(date_pattern, '', clean_desc)
+        # Strip inline dates like "14DEC2025" or "14Dec25" before extracting numbers
+        inline_date_pattern = r'\b\d{1,2}[A-Za-z]{3}\d{2,4}\b'
+        clean_desc = re.sub(inline_date_pattern, '', clean_desc)
         invoice_pattern = r'\b(?:invoice|inv)\s*\d+'
         clean_desc = re.sub(invoice_pattern, '', clean_desc, flags=re.IGNORECASE)
 
@@ -1703,6 +1913,8 @@ class ReconciliationSystem:
         clean_text = re.sub(r'\b(?:FOR|X)\s+(\d{1,2})\b',
                             lambda m: '' if int(m.group(1)) < 20 else m.group(0),
                             clean_text, flags=re.IGNORECASE)
+        # Strip inline dates like "14DEC2025" or "14Dec25" before removing numbers
+        clean_text = re.sub(r'\b\d{1,2}[A-Za-z]{3}\d{2,4}\b', '', clean_text)
         clean_text = re.sub(r'\b\d+(/\d+)?\b', '', clean_text)
         clean_text = re.sub(r'[-]', ' ', clean_text)
         clean_text = ' '.join(clean_text.split())
