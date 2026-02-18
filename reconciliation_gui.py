@@ -285,6 +285,12 @@ class ReconciliationGUI:
         ttk.Button(nav_row, text="Reset", command=self._on_reset,
                    style='Nav.TButton').pack(side=tk.RIGHT, padx=(0, 5))
 
+        # Go-to entry (jump to Nth entry in current list)
+        self.goto_entry = ttk.Entry(nav_row, width=4)
+        self.goto_entry.pack(side=tk.RIGHT, padx=(0, 2))
+        self.goto_entry.bind('<Return>', self._on_goto)
+        ttk.Label(nav_row, text="Go:", style='Small.TLabel').pack(side=tk.RIGHT, padx=(5, 0))
+
         # Status indicator
         self.bank_status_frame = tk.Frame(bank_outer, height=28)
         self.bank_status_frame.pack(fill=tk.X, pady=(0, 8))
@@ -426,6 +432,13 @@ class ReconciliationGUI:
         self.no_candidates_label = ttk.Label(beacon_outer, text="",
                                               font=('Segoe UI', 11), foreground='gray',
                                               justify='center')
+
+        # Amount mismatch suggestion (clickable)
+        self.amount_mismatch_label = tk.Label(
+            beacon_outer, text="", font=('Segoe UI', 10),
+            fg='#0066CC', cursor='hand2', justify='center', wraplength=400)
+        self.amount_mismatch_label.bind('<Button-1>', self._on_amount_mismatch_click)
+        self._amount_mismatch_beacon = None  # Store suggested beacon for click handler
 
         # Beacon search
         beacon_search_area = ttk.Frame(beacon_outer)
@@ -910,6 +923,8 @@ class ReconciliationGUI:
         self.beacon2_frame.pack_forget()
         self.total_frame.pack_forget()
         self.no_candidates_label.pack_forget()
+        self.amount_mismatch_label.pack_forget()
+        self._amount_mismatch_beacon = None
         self.rejected_indicator.pack_forget()
 
         bank = self._current_bank()
@@ -953,6 +968,23 @@ class ReconciliationGUI:
                      "Use manual trans_no match\nor mark as resolved"
             )
             self.no_candidates_label.pack(fill=tk.BOTH, expand=True, pady=20)
+
+            # Check for amount-mismatch suggestion
+            if bank:
+                suggestion = self.system.find_amount_mismatch_suggestion(bank)
+                if suggestion:
+                    beacon, name_score, date_score = suggestion
+                    diff = beacon.amount - bank.amount
+                    sign = '+' if diff > 0 else ''
+                    self._amount_mismatch_beacon = beacon
+                    self.amount_mismatch_label.config(
+                        text=f"Similar match with different amount:\n"
+                             f"{beacon.payee} {chr(163)}{beacon.amount} "
+                             f"({sign}{chr(163)}{diff})\n"
+                             f"[Click to view]"
+                    )
+                    self.amount_mismatch_label.pack(pady=(0, 10))
+
             self.beacon_nav_label.config(text="0 / 0", fg='gray',
                                           font=('Segoe UI', 10))
             self.confidence_label.config(text="")
@@ -1183,6 +1215,43 @@ class ReconciliationGUI:
         self._rebuild_bank_list()
         self._refresh_candidates()
         self._update_display()
+
+    def _on_goto(self, event=None):
+        """Jump to the Nth entry in the current bank list."""
+        text = self.goto_entry.get().strip()
+        if not text:
+            return
+        try:
+            n = int(text)
+        except ValueError:
+            return
+        if not self.bank_list:
+            return
+        # Clamp to valid range (1-based input)
+        idx = max(0, min(n - 1, len(self.bank_list) - 1))
+        self.bank_index = idx
+        # Clear any active bank search so nav label shows normal mode
+        self.bank_search_matches = []
+        self.bank_search_index = 0
+        self.bank_search_result.config(text="")
+        self.goto_entry.delete(0, tk.END)
+        self._refresh_candidates()
+        self._update_display()
+
+    def _on_amount_mismatch_click(self, event=None):
+        """Navigate to the amount-mismatch suggested beacon."""
+        if not self._amount_mismatch_beacon:
+            return
+        beacon = self._amount_mismatch_beacon
+        # Show as a temporary candidate
+        self.beacon_search_results = [beacon]
+        self.beacon_search_active = True
+        self.candidate_index = 0
+        self.beacon_search_result.config(
+            text=f"Amount mismatch: {beacon.id}", foreground='#CC8800')
+        self._update_beacon_panel()
+        self._update_action_states()
+        self._update_member_panel()
 
     # -------------------------------------------------------------------
     # Candidate navigation
@@ -1501,10 +1570,23 @@ class ReconciliationGUI:
                 self.bank_search_matches.append(bank_id_to_list_idx[bank_id])
 
         if not self.bank_search_matches:
-            # Results exist but not in current view - suggest showing all
-            self.bank_search_result.config(
-                text=f"{len(indices)} found (try Show All)", foreground='#CC8800'
-            )
+            # Results exist but not in current view - determine why
+            # Check if any matched entries are outside date range
+            outside_range = 0
+            for sys_idx in indices:
+                bank = self.system.bank_transactions[sys_idx]
+                if not self.system.is_bank_in_date_range(bank):
+                    outside_range += 1
+            if outside_range > 0:
+                self.bank_search_result.config(
+                    text=f"{len(indices)} found (outside date range)",
+                    foreground='#CC8800'
+                )
+            else:
+                self.bank_search_result.config(
+                    text=f"{len(indices)} found (try Show All)",
+                    foreground='#CC8800'
+                )
             return
 
         self.bank_search_index = 0

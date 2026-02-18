@@ -1315,6 +1315,110 @@ def test_excel_backup_loading():
     print("PASSED")
 
 
+def test_amount_mismatch_suggestion():
+    """Test amount mismatch suggestion when no normal candidates exist."""
+    print("\n=== Test: Amount Mismatch Suggestion ===")
+
+    system = make_system()
+
+    # BANK_0001: JONES A TRANSFER £13.00
+    # Should have normal candidates (exact amount match exists)
+    bank = system.bank_transactions[1]
+    candidates = system.get_candidates_for_bank(bank)
+    assert len(candidates) > 0, "Expected normal candidates for JONES"
+    suggestion = system.find_amount_mismatch_suggestion(bank)
+    # We don't check the suggestion when there ARE candidates
+    # (the GUI only calls this when candidates is empty)
+    print(f"  JONES A TRANSFER: {len(candidates)} candidates (suggestion not needed)")
+
+    # Create a bank entry with unique amount that matches no beacon
+    from datetime import datetime
+    unique_bank = BankTransaction(
+        id="TEST_MISMATCH", date=datetime(2025, 1, 16),
+        type="DD", description="JONES A SPECIAL",
+        amount=Decimal("999.99"), mem_nos=[]
+    )
+
+    # This should have no normal candidates (no beacon with £999.99)
+    candidates = system.get_candidates_for_bank(unique_bank)
+    assert len(candidates) == 0, f"Expected 0 candidates, got {len(candidates)}"
+
+    # But should find an amount mismatch suggestion (A Jones beacon exists with good name match)
+    suggestion = system.find_amount_mismatch_suggestion(unique_bank)
+    assert suggestion is not None, "Expected an amount mismatch suggestion for JONES"
+    beacon, name_score, date_score = suggestion
+    assert name_score >= 0.7, f"Expected name_score >= 0.7, got {name_score}"
+    print(f"  Amount mismatch suggestion: {beacon.payee} £{beacon.amount} "
+          f"(name={name_score:.0%}, date={date_score:.0%})")
+
+    # Bank entry with no name match should return None
+    no_match_bank = BankTransaction(
+        id="TEST_NOMATCH", date=datetime(2025, 1, 16),
+        type="DD", description="ZZZZZ UNIQUE",
+        amount=Decimal("999.99"), mem_nos=[]
+    )
+    suggestion = system.find_amount_mismatch_suggestion(no_match_bank)
+    assert suggestion is None, "Expected no suggestion for ZZZZZ UNIQUE"
+    print("  No suggestion for non-matching name: PASSED")
+
+    print("PASSED")
+
+
+def test_state_date_range_independence():
+    """Test that state is preserved when date range changes."""
+    print("\n=== Test: State Date Range Independence ===")
+
+    system = make_system()
+
+    # Reconcile an entry
+    bank = system.bank_transactions[0]  # First entry
+    candidates = system.get_candidates_for_bank(bank)
+    assert len(candidates) > 0
+    success, msg = system.reconcile(bank, candidates[0])
+    assert success, f"Reconcile failed: {msg}"
+    assert system.is_bank_reconciled(bank.id)
+
+    # Save state
+    system.save_state()
+    rec_count = len(system.reconciliations)
+    print(f"  Saved {rec_count} reconciliation(s)")
+
+    # Reload with a narrow date range that excludes the reconciled entry
+    from datetime import datetime
+    system2 = ReconciliationSystem(data_dir=DATA_DIR, code_dir=CODE_DIR)
+    system2.load_data()
+    system2.bank_date_from = datetime(2099, 1, 1)  # Far future = no entries in range
+
+    # All reconciliations should still be loaded
+    assert len(system2.reconciliations) == rec_count, \
+        f"Expected {rec_count} reconciliations after date range change, got {len(system2.reconciliations)}"
+    assert system2.is_bank_reconciled(bank.id), "Reconciliation should still exist"
+    print(f"  Loaded {len(system2.reconciliations)} reconciliation(s) with narrow date range")
+
+    # Stats should show 0 in-range bank entries, but reconciliation still exists
+    stats = system2.get_statistics()
+    assert stats['total_bank'] == 0, f"Expected 0 in-range bank, got {stats['total_bank']}"
+    print(f"  Stats: 0 in-range bank entries (correct)")
+
+    # Save again - state should still include all reconciliations
+    system2.save_state()
+
+    # Reload with no date range - everything should be back
+    system3 = ReconciliationSystem(data_dir=DATA_DIR, code_dir=CODE_DIR)
+    system3.load_data()
+    assert len(system3.reconciliations) == rec_count, \
+        f"Expected {rec_count} after restore, got {len(system3.reconciliations)}"
+    assert system3.is_bank_reconciled(bank.id), "Reconciliation should survive round-trip"
+    print(f"  Round-trip: {len(system3.reconciliations)} reconciliation(s) preserved")
+
+    # Clean up
+    state_file = os.path.join(DATA_DIR, 'reconciliation_state_v2.json')
+    if os.path.exists(state_file):
+        os.remove(state_file)
+
+    print("PASSED")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -1359,6 +1463,8 @@ def run_all_tests():
     test_reconciled_comment()
     test_surname_only_fallback()
     test_excel_backup_loading()
+    test_amount_mismatch_suggestion()
+    test_state_date_range_independence()
 
     # Final cleanup
     if os.path.exists(state_file):

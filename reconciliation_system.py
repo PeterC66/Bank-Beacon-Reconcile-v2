@@ -261,8 +261,6 @@ class ReconciliationSystem:
         self.rejected_pairings: List[Dict] = []  # [{bank_id, beacon_id}, ...]
         self.ignored_inconsistencies: List[Dict] = []  # [{bank_id, reason}, ...]
         # Out-of-range state (preserved on save but not used in session)
-        self._out_of_range_reconciliations: List[Reconciliation] = []
-        self._out_of_range_rejected: List[Dict] = []
 
         # Derived lookups (rebuilt from state)
         self._reconciled_bank_ids: Dict[str, Reconciliation] = {}
@@ -1077,9 +1075,10 @@ class ReconciliationSystem:
     def _load_state(self):
         """Load saved state from v2 JSON file.
 
-        Reconciliations and rejected pairings referencing bank entries
-        outside the configured date range are skipped so they don't
-        interfere with the current session or consistency checks.
+        All reconciliations and rejected pairings are loaded regardless
+        of the current date range, so state is never lost when the date
+        range configuration changes.  Date filtering is applied only at
+        the display/navigation level.
         """
         if not os.path.exists(self.state_file):
             return
@@ -1088,35 +1087,9 @@ class ReconciliationSystem:
             with open(self.state_file, 'r', encoding='utf-8') as f:
                 state = json.load(f)
 
-            # Build set of in-range bank IDs for filtering
-            in_range_bank_ids = {b.id for b in self.bank_transactions
-                                 if self.is_bank_in_date_range(b)}
-
-            all_recs = [Reconciliation.from_dict(r)
-                        for r in state.get('reconciliations', [])]
-            all_rejected = state.get('rejected_pairings', [])
-
-            skipped_recs = 0
-            skipped_rejected = 0
-
-            self.reconciliations = []
-            self._out_of_range_reconciliations = []
-            for rec in all_recs:
-                if rec.bank_id in in_range_bank_ids:
-                    self.reconciliations.append(rec)
-                else:
-                    self._out_of_range_reconciliations.append(rec)
-                    skipped_recs += 1
-
-            self.rejected_pairings = []
-            self._out_of_range_rejected = []
-            for rp in all_rejected:
-                if rp['bank_id'] in in_range_bank_ids:
-                    self.rejected_pairings.append(rp)
-                else:
-                    self._out_of_range_rejected.append(rp)
-                    skipped_rejected += 1
-
+            self.reconciliations = [Reconciliation.from_dict(r)
+                                    for r in state.get('reconciliations', [])]
+            self.rejected_pairings = state.get('rejected_pairings', [])
             self.ignored_inconsistencies = state.get('ignored_inconsistencies', [])
 
             self._rebuild_lookups()
@@ -1126,12 +1099,8 @@ class ReconciliationSystem:
                 if entry.id in self._reconciled_beacon_ids:
                     entry.matched = True
 
-            msg = (f"Loaded state: {len(self.reconciliations)} reconciliations, "
-                   f"{len(self.rejected_pairings)} rejected pairings")
-            if skipped_recs or skipped_rejected:
-                msg += (f" (skipped {skipped_recs} reconciliations, "
-                        f"{skipped_rejected} rejected outside date range)")
-            print(msg)
+            print(f"Loaded state: {len(self.reconciliations)} reconciliations, "
+                  f"{len(self.rejected_pairings)} rejected pairings")
 
         except (json.JSONDecodeError, KeyError) as e:
             print(f"Warning: Could not load state: {e}")
@@ -1139,16 +1108,13 @@ class ReconciliationSystem:
     def save_state(self):
         """Save current state to v2 JSON file.
 
-        Merges back any out-of-range entries that were skipped during load
-        so they are preserved for future sessions with different date ranges.
+        All reconciliations are saved regardless of date range so state
+        is preserved when the date range configuration changes.
         """
-        all_recs = self.reconciliations + self._out_of_range_reconciliations
-        all_rejected = self.rejected_pairings + self._out_of_range_rejected
-
         state = {
             'version': VERSION,
-            'reconciliations': [r.to_dict() for r in all_recs],
-            'rejected_pairings': all_rejected,
+            'reconciliations': [r.to_dict() for r in self.reconciliations],
+            'rejected_pairings': self.rejected_pairings,
             'ignored_inconsistencies': self.ignored_inconsistencies
         }
 
@@ -1272,6 +1238,47 @@ class ReconciliationSystem:
         all_candidates.sort(key=lambda c: (c.is_rejected, -c.confidence_score))
 
         return all_candidates
+
+    def find_amount_mismatch_suggestion(self, bank_txn: BankTransaction
+                                         ) -> Optional[Tuple['BeaconEntry', float, float]]:
+        """Find a beacon with good name/date match but different amount.
+
+        Only called when there are zero normal candidates.
+        Returns (beacon, name_score, date_score) or None.
+        """
+        available = [b for b in self.beacon_entries
+                     if b.id not in self._reconciled_beacon_ids
+                     and b.amount != bank_txn.amount]
+
+        best = None
+        best_combined = 0.0
+
+        for beacon in available:
+            date_score = self._calculate_date_score(bank_txn.date, beacon.date)
+            if date_score == 0:
+                continue
+
+            # Check member match first
+            member_score = self._calculate_member_match_score(bank_txn, beacon)
+            if member_score > 0:
+                name_score = member_score
+            else:
+                name_score = self._calculate_name_score(
+                    bank_txn.description, beacon.payee)
+                if self.match_beacon_detail and beacon.detail:
+                    detail_score = self._calculate_name_score(
+                        bank_txn.description, beacon.detail)
+                    name_score = max(name_score, detail_score)
+
+            if name_score < 0.7:
+                continue
+
+            combined = name_score * 0.6 + date_score * 0.4
+            if combined > best_combined:
+                best_combined = combined
+                best = (beacon, name_score, date_score)
+
+        return best
 
     def _find_1to1_candidates(self, bank_txn: BankTransaction,
                                available: List[BeaconEntry]) -> List[BeaconCandidate]:
@@ -2328,6 +2335,8 @@ class ReconciliationSystem:
 
     def export_reconciled_csv(self, filepath: str) -> int:
         """Export reconciled transactions to CSV. Returns rows written."""
+        in_range_ids = {b.id for b in self.bank_transactions
+                        if self.is_bank_in_date_range(b)}
         bank_by_id = {b.id: b for b in self.bank_transactions}
         beacon_by_id = {b.id: b for b in self.beacon_entries}
 
@@ -2342,6 +2351,8 @@ class ReconciliationSystem:
             ])
             for rec in self.reconciliations:
                 if rec.status != 'reconciled':
+                    continue
+                if rec.bank_id not in in_range_ids:
                     continue
                 bank = bank_by_id.get(rec.bank_id)
                 if not bank:
@@ -2393,8 +2404,12 @@ class ReconciliationSystem:
 
     def export_resolved_csv(self, filepath: str) -> int:
         """Export manually resolved bank transactions to CSV."""
+        in_range_ids = {b.id for b in self.bank_transactions
+                        if self.is_bank_in_date_range(b)}
         bank_by_id = {b.id: b for b in self.bank_transactions}
-        resolved = [r for r in self.reconciliations if r.status == 'manually_resolved']
+        resolved = [r for r in self.reconciliations
+                    if r.status == 'manually_resolved'
+                    and r.bank_id in in_range_ids]
 
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
