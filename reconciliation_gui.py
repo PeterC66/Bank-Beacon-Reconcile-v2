@@ -621,26 +621,70 @@ class ReconciliationGUI:
             if mem_nos:
                 source_label = " (from bank description)"
 
+        # Tier-2 suggestion fallback: collect from beacon and bank when no confirmed member
+        suggested_nos = []
         if not mem_nos:
+            # Gather suggestions from current beacon candidate(s)
+            rec = self.system.get_reconciliation_for_bank(bank.id)
+            if rec and rec.status != 'manually_resolved' and rec.beacon_ids:
+                beacons = self.system.get_beacon_entries_for_reconciliation(rec)
+                for b in beacons:
+                    for s in b.suggested_mem_nos:
+                        if s not in suggested_nos and s in self.system.member_lookup:
+                            suggested_nos.append(s)
+            elif self.beacon_search_active:
+                if (self.beacon_search_results and
+                        0 <= self.candidate_index < len(self.beacon_search_results)):
+                    b = self.beacon_search_results[self.candidate_index]
+                    for s in b.suggested_mem_nos:
+                        if s not in suggested_nos and s in self.system.member_lookup:
+                            suggested_nos.append(s)
+            else:
+                candidate = self._current_candidate()
+                if candidate:
+                    for b in candidate.beacon_entries:
+                        for s in b.suggested_mem_nos:
+                            if s not in suggested_nos and s in self.system.member_lookup:
+                                suggested_nos.append(s)
+            # Also from bank description
+            for s in bank.suggested_mem_nos:
+                if s not in suggested_nos and s in self.system.member_lookup:
+                    suggested_nos.append(s)
+
+        if not mem_nos and not suggested_nos:
             self.member_panel_header.config(text="No member identified")
             return
 
-        # Build header from member numbers
-        header_parts = []
-        for num in mem_nos:
-            info = self.system.member_lookup.get(num)
-            if info:
-                header_parts.append(f"{info['forename']} {info['surname']} (#{num})")
-            else:
-                header_parts.append(f"#{num}")
-        self.member_panel_header.config(
-            text=", ".join(header_parts) + source_label
-        )
+        # Build header from confirmed or suggested member numbers
+        if mem_nos:
+            header_parts = []
+            for num in mem_nos:
+                info = self.system.member_lookup.get(num)
+                if info:
+                    header_parts.append(f"{info['forename']} {info['surname']} (#{num})")
+                else:
+                    header_parts.append(f"#{num}")
+            self.member_panel_header.config(
+                text=", ".join(header_parts) + source_label
+            )
+        else:
+            # Tier-2 suggestions only
+            header_parts = []
+            for num in suggested_nos:
+                info = self.system.member_lookup.get(num)
+                if info:
+                    header_parts.append(f"{info['forename']} {info['surname']} (#{num})")
+                else:
+                    header_parts.append(f"#{num}")
+            self.member_panel_header.config(
+                text=", ".join(header_parts) + " (suggested)"
+            )
 
-        # Populate tree with all beacon entries for these members
+        # Populate tree with all beacon entries for confirmed or suggested members
+        display_nos = mem_nos if mem_nos else suggested_nos
         seen_beacon_ids = set()
         row_num = 0
-        for mem_no in mem_nos:
+        for mem_no in display_nos:
             beacons = self.system.get_beacon_entries_for_member_no(mem_no)
             for beacon in beacons:
                 if beacon.id in seen_beacon_ids:

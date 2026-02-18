@@ -1419,6 +1419,317 @@ def test_state_date_range_independence():
     print("PASSED")
 
 
+def test_inline_date_stripping():
+    """Test that inline date patterns like 14DEC2025, 14Dec25 are stripped."""
+    print("\n=== Test: Inline Date Stripping ===")
+
+    system = make_system()
+
+    # extract_member_numbers: inline date should not produce false member numbers
+    # "PAYMENT 14DEC2025 SMITH" -> 14DEC2025 stripped, no numeric member numbers
+    nums = system.extract_member_numbers("PAYMENT 14DEC2025 SMITH")
+    assert 14 not in [int(n) for n in nums], \
+        f"14 from '14DEC2025' should not be extracted as member number: {nums}"
+    assert 2025 not in [int(n) for n in nums], \
+        f"2025 from '14DEC2025' should not be extracted: {nums}"
+    print(f"  extract_member_numbers('PAYMENT 14DEC2025 SMITH'): {nums}")
+
+    # Uppercase month
+    nums2 = system.extract_member_numbers("BAKER VA 14DEC2025")
+    assert 14 not in [int(n) for n in nums2], \
+        f"14 from '14DEC2025' should not be extracted: {nums2}"
+    print(f"  extract_member_numbers('BAKER VA 14DEC2025'): {nums2}")
+
+    # Mixed case short year
+    nums3 = system.extract_member_numbers("SMITH J 5Jan25")
+    assert 5 not in [int(n) for n in nums3], \
+        f"5 from '5Jan25' should not be extracted: {nums3}"
+    print(f"  extract_member_numbers('SMITH J 5Jan25'): {nums3}")
+
+    # Real member number alongside inline date should still be extracted
+    nums4 = system.extract_member_numbers("u3a823 14DEC2025 payment")
+    assert '823' in nums4, f"u3a823 should still extract 823: {nums4}"
+    assert 14 not in [int(n) for n in nums4 if n != '823'], \
+        f"14 from inline date should not appear: {nums4}"
+    print(f"  extract_member_numbers('u3a823 14DEC2025'): {nums4} (expects 823)")
+
+    # _extract_potential_surnames: inline date chars like "DEC" should not appear as surname
+    surnames = system._extract_potential_surnames("HAYWARD PJ 14DEC2025 POTTERY")
+    # "DEC" might be long enough to be a surname, but it's part of the inline date
+    assert 'DEC' not in surnames, \
+        f"DEC from inline date should not be a surname: {surnames}"
+    assert 'HAYWARD' in surnames, f"HAYWARD should be found: {surnames}"
+    print(f"  _extract_potential_surnames('HAYWARD PJ 14DEC2025 POTTERY'): {surnames}")
+
+    print("PASSED")
+
+
+def test_resolve_payee_to_memno():
+    """Test _resolve_payee_to_memno with various name formats."""
+    print("\n=== Test: _resolve_payee_to_memno ===")
+
+    from datetime import datetime
+
+    system = make_system()
+
+    # Add test members to cover all name-format scenarios
+    # member_lookup already has: 823=L Leonard, 1783=Barbara Duke,
+    # 1679=Virginia Wykes (Ginny), 1786=Paul Rourke, 1785=Juliet Rourke, 536=Lyn Bates
+    # We add Peter Hayward for forename-surname tests
+    system.member_lookup['8001'] = {
+        'status': 'current', 'forename': 'Peter', 'surname': 'Hayward',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+    system.member_lookup['8002'] = {
+        'status': 'current', 'forename': 'Angela', 'surname': 'Bouch',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+    system.member_lookup['8003'] = {
+        'status': 'current', 'forename': 'Ian', 'surname': 'Drummond',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+
+    try:
+        # "Forename Surname" exact match
+        nos, tier = system._resolve_payee_to_memno("Peter Hayward")
+        assert tier == 1 and nos == ['8001'], \
+            f"'Peter Hayward' expected (['8001'], 1), got ({nos}, {tier})"
+        print("  'Peter Hayward' -> 8001 Tier 1: PASSED")
+
+        # "Surname Forename" reversed
+        nos, tier = system._resolve_payee_to_memno("Bouch Angela")
+        assert tier == 1 and nos == ['8002'], \
+            f"'Bouch Angela' expected (['8002'], 1), got ({nos}, {tier})"
+        print("  'Bouch Angela' -> 8002 Tier 1: PASSED")
+
+        # "Surname Initial" (Oakman P style) - use Wykes V
+        nos, tier = system._resolve_payee_to_memno("Wykes V")
+        assert tier == 1 and nos == ['1679'], \
+            f"'Wykes V' expected (['1679'], 1), got ({nos}, {tier})"
+        print("  'Wykes V' -> 1679 Tier 1: PASSED")
+
+        # "Initial Surname" (I Drummond style)
+        nos, tier = system._resolve_payee_to_memno("I Drummond")
+        assert tier == 1 and nos == ['8003'], \
+            f"'I Drummond' expected (['8003'], 1), got ({nos}, {tier})"
+        print("  'I Drummond' -> 8003 Tier 1: PASSED")
+
+        # "Surname Initials" (Chapman SJ style) - use Rourke J
+        nos, tier = system._resolve_payee_to_memno("Rourke J")
+        assert tier == 1 and nos == ['1785'], \
+            f"'Rourke J' expected (['1785'], 1), got ({nos}, {tier})"
+        print("  'Rourke J' -> 1785 Tier 1: PASSED")
+
+        # "Surname Initials" two-letter (Baker VA style) - Rourke P
+        nos, tier = system._resolve_payee_to_memno("Rourke P")
+        assert tier == 1 and nos == ['1786'], \
+            f"'Rourke P' expected (['1786'], 1), got ({nos}, {tier})"
+        print("  'Rourke P' -> 1786 Tier 1: PASSED")
+
+        # Ambiguous surname only -> Tier 2
+        nos, tier = system._resolve_payee_to_memno("Rourke")
+        assert tier == 2, f"'Rourke' (2 members) should be Tier 2, got tier={tier}"
+        assert '1785' in nos and '1786' in nos, \
+            f"Both Rourkes expected in suggestions: {nos}"
+        print(f"  'Rourke' -> Tier 2, {len(nos)} suggestions: PASSED")
+
+        # No match -> tier 0
+        nos, tier = system._resolve_payee_to_memno("ZZZ Nomatch")
+        assert tier == 0 and nos == [], \
+            f"Unknown name expected ([], 0), got ({nos}, {tier})"
+        print("  Unknown name -> ([], 0): PASSED")
+
+        # Empty payee -> tier 0
+        nos, tier = system._resolve_payee_to_memno("")
+        assert tier == 0 and nos == []
+        print("  Empty payee -> ([], 0): PASSED")
+
+        # With title prefix stripped
+        nos, tier = system._resolve_payee_to_memno("Mrs Bouch Angela")
+        assert tier == 1 and nos == ['8002'], \
+            f"'Mrs Bouch Angela' expected (['8002'], 1), got ({nos}, {tier})"
+        print("  'Mrs Bouch Angela' -> 8002 Tier 1: PASSED")
+
+        # Known_as match: "Ginny Wykes" should resolve to 1679
+        nos, tier = system._resolve_payee_to_memno("Ginny Wykes")
+        assert tier == 1 and nos == ['1679'], \
+            f"'Ginny Wykes' expected (['1679'], 1), got ({nos}, {tier})"
+        print("  'Ginny Wykes' -> 1679 Tier 1 (known_as): PASSED")
+
+    finally:
+        del system.member_lookup['8001']
+        del system.member_lookup['8002']
+        del system.member_lookup['8003']
+
+    print("PASSED")
+
+
+def test_resolve_description_to_memno():
+    """Test _resolve_description_to_memno for bank description name matching."""
+    print("\n=== Test: _resolve_description_to_memno ===")
+
+    system = make_system()
+
+    # Add test members
+    system.member_lookup['8010'] = {
+        'status': 'current', 'forename': 'Philip', 'surname': 'Oakman',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+
+    try:
+        # "ROURKE P PAYMENT" -> Tier 1 (unique: Paul Rourke 1786)
+        nos, tier = system._resolve_description_to_memno("ROURKE P PAYMENT")
+        assert tier == 1 and '1786' in nos, \
+            f"'ROURKE P PAYMENT' expected Tier 1 with 1786, got ({nos}, {tier})"
+        print(f"  'ROURKE P PAYMENT' -> {nos} Tier {tier}: PASSED")
+
+        # "ROURKE J TRIP" -> Tier 1 (Juliet Rourke 1785)
+        nos, tier = system._resolve_description_to_memno("ROURKE J TRIP")
+        assert tier == 1 and '1785' in nos, \
+            f"'ROURKE J TRIP' expected Tier 1 with 1785, got ({nos}, {tier})"
+        print(f"  'ROURKE J TRIP' -> {nos} Tier {tier}: PASSED")
+
+        # "P Oakman" -> Tier 1 (Philip Oakman 8010, initial P before surname)
+        nos, tier = system._resolve_description_to_memno("P Oakman")
+        assert tier == 1 and '8010' in nos, \
+            f"'P Oakman' expected Tier 1 with 8010, got ({nos}, {tier})"
+        print(f"  'P Oakman' -> {nos} Tier {tier}: PASSED")
+
+        # "ROURKE PAYMENT" -> Tier 2 (ambiguous: 2 Rourkes)
+        nos, tier = system._resolve_description_to_memno("ROURKE PAYMENT")
+        assert tier == 2, \
+            f"'ROURKE PAYMENT' (ambiguous) expected Tier 2, got tier={tier}"
+        assert '1785' in nos and '1786' in nos, \
+            f"Both Rourkes expected in suggestions: {nos}"
+        print(f"  'ROURKE PAYMENT' -> Tier 2, {len(nos)} suggestions: PASSED")
+
+        # No alphabetic surname match -> tier 0
+        nos, tier = system._resolve_description_to_memno("12345 PAYMENT")
+        assert tier == 0 and nos == [], \
+            f"Numeric-only expected ([], 0), got ({nos}, {tier})"
+        print("  '12345 PAYMENT' -> ([], 0): PASSED")
+
+        # Inline date in description should be ignored, not treated as surname
+        nos, tier = system._resolve_description_to_memno("ROURKE P 14DEC2025")
+        assert tier == 1 and '1786' in nos, \
+            f"'ROURKE P 14DEC2025' should resolve via name, not confused by date: {nos}, {tier}"
+        print(f"  'ROURKE P 14DEC2025' -> {nos} Tier {tier}: PASSED")
+
+    finally:
+        del system.member_lookup['8010']
+
+    print("PASSED")
+
+
+def test_member_resolution_payee_fallback():
+    """Test _resolve_member_numbers payee fallback and suggested_mem_nos."""
+    print("\n=== Test: Member Resolution Payee Fallback ===")
+
+    from datetime import datetime
+
+    system = make_system()
+
+    # Add a test member
+    system.member_lookup['8020'] = {
+        'status': 'current', 'forename': 'Helen', 'surname': 'Forsyth',
+        'known_as': '', 'class': '', 'payment_type': ''
+    }
+
+    try:
+        # Beacon with empty member_1 but resolvable payee (Tier 1)
+        beacon_t1 = BeaconEntry(
+            id="TEST_PF_T1", date=datetime(2025, 1, 15),
+            trans_no="PF001", payee="Helen Forsyth", detail="",
+            amount=Decimal("10.00")
+        )
+        # Beacon with ambiguous payee (Tier 2)
+        beacon_t2 = BeaconEntry(
+            id="TEST_PF_T2", date=datetime(2025, 1, 16),
+            trans_no="PF002", payee="Rourke", detail="",
+            amount=Decimal("13.00")
+        )
+        # Beacon with member_1 set - payee fallback should NOT run
+        beacon_has_m1 = BeaconEntry(
+            id="TEST_PF_M1", date=datetime(2025, 1, 17),
+            trans_no="PF003", payee="Rourke", detail="",
+            amount=Decimal("9.50"), member_1="PaulRourke"
+        )
+
+        original_beacons = system.beacon_entries[:]
+        original_banks = system.bank_transactions[:]
+
+        # Bank with no numeric member numbers but resolvable name (Tier 1)
+        bank_t1 = BankTransaction(
+            id="TEST_PF_BK1", date=datetime(2025, 1, 15),
+            type="DEB", description="ROURKE P PAYMENT",
+            amount=Decimal("10.00")
+        )
+        # Bank with no numeric member numbers, ambiguous name (Tier 2)
+        bank_t2 = BankTransaction(
+            id="TEST_PF_BK2", date=datetime(2025, 1, 16),
+            type="DEB", description="ROURKE TRANSFER",
+            amount=Decimal("13.00")
+        )
+        # Bank with a numeric member number - name fallback should not override
+        bank_has_num = BankTransaction(
+            id="TEST_PF_BK3", date=datetime(2025, 1, 17),
+            type="DEB", description="PAYMENT 1786",
+            amount=Decimal("9.50")
+        )
+
+        system.beacon_entries = [beacon_t1, beacon_t2, beacon_has_m1]
+        system.bank_transactions = [bank_t1, bank_t2, bank_has_num]
+        system._resolve_member_numbers()
+
+        # Beacon Tier 1: payee "Helen Forsyth" → mem_no_1 = 8020
+        assert beacon_t1.mem_no_1 == '8020', \
+            f"Beacon T1: expected mem_no_1='8020', got '{beacon_t1.mem_no_1}'"
+        assert beacon_t1.suggested_mem_nos == [], \
+            f"Beacon T1: no suggestions expected, got {beacon_t1.suggested_mem_nos}"
+        print(f"  Beacon Tier 1 payee resolution: mem_no_1={beacon_t1.mem_no_1} PASSED")
+
+        # Beacon Tier 2: payee "Rourke" (ambiguous) → suggested_mem_nos set
+        assert beacon_t2.mem_no_1 == '', \
+            f"Beacon T2: mem_no_1 should be empty, got '{beacon_t2.mem_no_1}'"
+        assert '1785' in beacon_t2.suggested_mem_nos and '1786' in beacon_t2.suggested_mem_nos, \
+            f"Beacon T2: both Rourkes expected in suggestions: {beacon_t2.suggested_mem_nos}"
+        print(f"  Beacon Tier 2 payee suggestions: {beacon_t2.suggested_mem_nos} PASSED")
+
+        # Beacon with member_1 set: payee fallback not applied
+        # member_1="PaulRourke" may or may not resolve; either way payee not used alone
+        assert beacon_has_m1.suggested_mem_nos == [] or beacon_has_m1.mem_no_1 != '', \
+            "member_1 set: either resolved or no suggestions from payee fallback"
+        print(f"  Beacon with member_1: mem_no_1={beacon_has_m1.mem_no_1} PASSED")
+
+        # Bank Tier 1: "ROURKE P PAYMENT" → mem_nos=['1786']
+        assert '1786' in bank_t1.mem_nos, \
+            f"Bank T1: expected '1786' in mem_nos, got {bank_t1.mem_nos}"
+        assert bank_t1.suggested_mem_nos == [], \
+            f"Bank T1: no suggestions expected, got {bank_t1.suggested_mem_nos}"
+        print(f"  Bank Tier 1 description name: mem_nos={bank_t1.mem_nos} PASSED")
+
+        # Bank Tier 2: "ROURKE TRANSFER" → suggested_mem_nos set
+        assert bank_t2.mem_nos == [], \
+            f"Bank T2: mem_nos should be empty, got {bank_t2.mem_nos}"
+        assert '1785' in bank_t2.suggested_mem_nos and '1786' in bank_t2.suggested_mem_nos, \
+            f"Bank T2: both Rourkes expected in suggestions: {bank_t2.suggested_mem_nos}"
+        print(f"  Bank Tier 2 description suggestions: {bank_t2.suggested_mem_nos} PASSED")
+
+        # Bank with numeric member number: name fallback not applied
+        assert '1786' in bank_has_num.mem_nos, \
+            f"Bank with numeric: should keep numeric result, got {bank_has_num.mem_nos}"
+        assert bank_has_num.suggested_mem_nos == [], \
+            f"Bank with numeric: no suggestions expected, got {bank_has_num.suggested_mem_nos}"
+        print(f"  Bank with numeric mem_no: mem_nos={bank_has_num.mem_nos} PASSED")
+
+    finally:
+        system.beacon_entries = original_beacons
+        system.bank_transactions = original_banks
+        del system.member_lookup['8020']
+
+    print("PASSED")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -1465,6 +1776,10 @@ def run_all_tests():
     test_excel_backup_loading()
     test_amount_mismatch_suggestion()
     test_state_date_range_independence()
+    test_inline_date_stripping()
+    test_resolve_payee_to_memno()
+    test_resolve_description_to_memno()
+    test_member_resolution_payee_fallback()
 
     # Final cleanup
     if os.path.exists(state_file):
