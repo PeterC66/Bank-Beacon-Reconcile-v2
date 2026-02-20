@@ -12,7 +12,7 @@ python test_reconciliation.py
 ## Key Files
 - `reconciliation_system.py` - Core engine (loading, matching, reconciliation, reports)
 - `reconciliation_gui.py` - Tkinter GUI
-- `test_reconciliation.py` - Test suite (30 tests, uses `data/sample/`)
+- `test_reconciliation.py` - Test suite (38 tests, uses `data/sample/`)
 - `member_lookup.csv` - Shared member directory (code level)
 - `memno_aliases.csv` - Member number aliases (code level, optional)
 - `confusable_members.csv` - Pairs of easily confused members (code level, optional)
@@ -22,7 +22,7 @@ python test_reconciliation.py
 ## Conventions
 - **Terminology**: "Reconciled" not "confirmed"
 - **Version**: Ask before incrementing. Format: major.minor.patch
-- **Current version**: 2.1.0
+- **Current version**: 2.2.0
 - **Data folders**: Each dataset in `data/<name>/` with own `config.json`, CSVs, `run.bat`
 - **Member fields**: `member_1`/`member_2` on beacon = forename+surname, no space (e.g. "LLeonard")
 
