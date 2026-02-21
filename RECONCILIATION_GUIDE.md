@@ -41,6 +41,7 @@ The recommended order is: **auto-reconcile first** (to handle clear-cut matches 
 
 Double-click `run.bat` in your data folder. The GUI will open and load your bank and Beacon data.
 
+![BBR anonymised](https://github.com/user-attachments/assets/810b696a-1b32-40f0-80f1-d7c6a51e6c91)
 *[Screenshot: application on startup showing both panels loaded]*
 
 The stats bar at the top shows a summary:
@@ -55,7 +56,7 @@ By default, the bank panel shows **only un-reconciled entries**. Tick **Show all
 
 ## Understanding the interface
 
-*[Screenshot: annotated overview of the full GUI window]*
+*[Screenshot TBD: annotated overview of the full GUI window]*
 
 ### Stats bar (top)
 
@@ -63,7 +64,7 @@ Shows running totals: how many bank entries are reconciled, un-reconciled, and r
 
 ### Left panel — bank entry
 
-*[Screenshot: left panel showing a single bank entry]*
+*[Screenshot TBD: left panel showing a single bank entry]*
 
 Displays the current bank transaction:
 - **Date**, **Type**, **Description**, **Amount**
@@ -74,7 +75,7 @@ Navigate with **< Prev Bank** and **Next Bank >**.
 
 ### Right panel — Beacon candidates
 
-*[Screenshot: right panel showing ranked candidates]*
+*[Screenshot TBD: right panel showing ranked candidates]*
 
 Shows the Beacon candidates for the current bank entry, ranked by confidence (highest first). Each candidate shows:
 - **Confidence score** (e.g. `0.87`) and match type (`1-to-1` or `1-to-2`)
@@ -116,7 +117,7 @@ Click **Auto-Reconcile**. The system will reconcile all candidates whose confide
 - Common amounts (e.g. subscription fees): threshold 0.90 by default
 - All other amounts: threshold 0.80 by default
 
-*[Screenshot: after auto-reconcile — stats bar showing updated reconciled count]*
+*[Screenshot TBD: after auto-reconcile — stats bar showing updated reconciled count]*
 
 Auto-reconcile only acts on **unambiguous** high-confidence matches. It will not reconcile an entry if two candidates are both above the threshold. Review the stats bar to see how many were resolved.
 
@@ -134,7 +135,7 @@ For each bank entry:
 
 Check the confidence score, date, payee name, and amount. If satisfied, click **Reconcile**. The system moves automatically to the next un-reconciled bank entry.
 
-*[Screenshot: a bank entry with a clear high-confidence candidate, about to be reconciled]*
+*[Screenshot TBD: a bank entry with a clear high-confidence candidate, about to be reconciled]*
 
 #### If the top candidate is wrong
 
@@ -144,7 +145,7 @@ Click **Reject Pairing** to push it to the bottom of the candidate list. The nex
 
 Click **Manual Match**. Enter the `trans_no` of the Beacon entry (e.g. `TRN1234`). For a 1-to-2 match, enter two trans_nos separated by a comma or space. Click **OK**.
 
-*[Screenshot: manual match dialog with a trans_no entered]*
+*[Screenshot TBD: manual match dialog with a trans_no entered]*
 
 > **Finding a trans_no:** Use the Beacon search panel (right side) to locate the entry. Tick **All beacons** to search across all entries including already-reconciled ones. Search by payee name, amount (e.g. `£26.00`), date (e.g. `17/03/2025`), or trans_no directly (e.g. `TRN1234`).
 
@@ -160,7 +161,7 @@ Some bank entries may genuinely have no corresponding Beacon entry — for examp
 
 Click **Mark Resolved** and enter a brief comment explaining the situation (e.g. `Bank charge — not in Beacon`, `Transfer to savings — internal`).
 
-*[Screenshot: Mark Resolved dialog with a comment entered]*
+*[Screenshot TBD: Mark Resolved dialog with a comment entered]*
 
 Resolved entries appear in the `report_resolved.csv` report and are excluded from the un-reconciled count.
 
@@ -180,7 +181,7 @@ Five CSV/text files are written to your data folder:
 | `report_resolved.csv` | Manually resolved entries with your comments |
 | `report_stats.txt` | Summary counts and totals, dated and versioned |
 
-*[Screenshot: data folder in Windows Explorer showing the five report files]*
+*[Screenshot TBD: data folder in Windows Explorer showing the five report files]*
 
 Open the files in Excel to review. The `report_stats.txt` file is a quick sanity check — it should show zero (or explained) un-reconciled entries when you are done.
 
